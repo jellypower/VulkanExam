@@ -11,13 +11,16 @@
 #include <optional>
 #include <set>
 #include <algorithm>
-#include<string>
-
+#include <string>
+#include <fstream>
 
 VkResult CreateDeubgUtilMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
     auto func =
         (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    // debug messenger를 만들기 위해선 debug messenger create info를 vkCreateDebugUtilsMessengerEXT 함수에
+    // 전달해줘야 하는데 vkCreateDebugUtilsMessengerEXT 함수는 extension이기 때문에 자동으로 load되지 않아서
+    // 직접 load해줘야 한다. (vkGetInstanceProcAddr함수: 커맨드로 얻어올 수 있는 모든 함수에 대한 포인터)
 
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
@@ -38,6 +41,24 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
     }
 }
 
+static std::vector<char> readFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("failed to open file!");
+    }
+
+    size_t fileSize = (size_t)file.tellg();
+    std::vector<char> buffer(fileSize);
+
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+
+    file.close();
+
+    return buffer;
+}
+
  
 class HelloTriangleApplication {
 public:
@@ -53,6 +74,8 @@ private:
     GLFWwindow* window;
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
+    // vulkan에선, debugmessenger마저 handle을 이용해 명시적으로 생성해주고 파괴해줘야 한다.
+    // 이를 위해서 class멤버로 debugMessenger를 선언해줘야 한다.
     VkSurfaceKHR surface;
     VkSwapchainKHR swapChain;
     std::vector<VkImage> swapChainImages;
@@ -126,20 +149,32 @@ private:
 
         if (enableValidationlayers) {
             extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            // validation layer 자체를 enable하는데 필요한 extension을 로딩
         }
 
         return extensions;
 
     }
 
+    // VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity: 메세지의 severity의 정도를 나타내는 파라미터
+    // VkDebugUtilsMessageTypeFlagsEXT messageType: 메세지의 타입 \
+           // 1) 성능, 스펙과 관계 없는 event 발생 \
+           // 2) 성능, 스펙을 어기는 event 발생 \
+           // 3) vulkan의 non optimal한 usage
+    // const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData: struct형태로 메세지의 디테일을 나타내줌
+    // void* pUserData: pUserData를 이용하면 callback의 setup단계에서 정의되며 이를 통해 데이터를 보내줄 수 있다.
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-        VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-        VkDebugUtilsMessageTypeFlagsEXT messageType,
+        VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, // 메세지의 severity의 정도를 나타내는 파라미터
+        VkDebugUtilsMessageTypeFlagsEXT messageType, // 메세지의 타입: 
         const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData) {
         std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
 
+
         return VK_FALSE;
+        // callback의 return값은 boolean으로 만약 vulkan이 call한 layer메세지가 중단돼야하는지를 결정한다.
+        // 만약 callback이 true를 return하면 호출은 중단되고 VK_ERROR_VALIDATION_FAILED_EXT에러를 던진다.
+        // 보통 validation layer자체가 오류가 있는지를 판단하기 위해 사용되기때문에 보통은 항상 false로 설정해야 한다.
     }
 
 private:
@@ -164,6 +199,69 @@ private:
         createLogicalDevice();
         createSwapChain();
         createImageViews();
+        createGraphicsPipeline();
+    }
+
+    void createGraphicsPipeline() {
+        auto vertShaderCode = readFile("vert.spv");
+        auto fragShaderCode = readFile("frag.spv"); //SPIR-V byte code를 읽어오고
+
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+        // 파이프라인에 셰이더 코드를 넘겨주기 위해서는 이것을 Shader module으로 감싼 object를 넘겨줘야만 한다.
+
+
+        // 실제로 셰이더를 활용하기 위해선 셰이더코드들을 pipeline stage에 할당해야 한다.
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule; // 넘겨줄 shader module
+        vertShaderStageInfo.pName = "main";
+        // invoke할 함수 이름(entry point)
+        // entry point를 정해줄 수 있다는 것은 즉, 여러 fragment를 single shader module에 묶어서 
+        // 다른 entry point를 설정하여 행동을 바꿔 줄 수 있다는 것이다.
+
+
+        // pSpecializationInfo: 현재 쓰이고 있지는 않지만 나름 중요한 파라미터
+        // shader의 constant의 value를 지정할 수 있게 해준다.
+        // 이를 통해 하나의 shaderModule을 사용하면서도 다른 constant value를 지정하는 파이프라인이 생성 가능하다.
+        // 이렇게 하면 render time에 variable의 value를 지정하는 것보다 optimizing이 가능한데
+        // 가령 if문의 경우에 이렇게 constant value를 지정하면 이에 종속된 if statement를 없앨 수 있다.
+
+
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+        
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr); 
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+        // SPIR-V byte code를 GPU에 맞는 machine code로 바꾸기 위해선 파이프라인이 만들어져야 한다.
+        // 그 말인 즉슨, 파이프라인이 만들어지면 이미 machine code가 생겨 shaderModule은 필요가 없어진다. 
+
+
+        // 오래된 그래픽 api들은 그래픽파이프라인의 대부분의 stage를 default로 제공했다.
+        // 그러나, vulkan은 파이프라인을 immutable(불변하는)한 pipeline state object로 만들어야 한다.
+    }
+
+    VkShaderModule createShaderModule(const std::vector<char>& code) {
+        VkShaderModuleCreateInfo createInfo{};
+
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        createInfo.codeSize = code.size();
+        createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+        VkShaderModule shaderModule;
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create shader module!");
+        }
+        // 셰이더 모듈이 만들어지면 spir-v에서 빌드된 셰이더코드가 저장된 버퍼는 바로 해제돼도 된다.
+
+        return shaderModule;
     }
 
     void createImageViews() {
@@ -404,6 +502,7 @@ private:
 
         
         auto extensions = getRequiredExtensions();
+        // validation layer가 enabled돼있는지에 따라서 extensions의 list를 받아옴
 
         createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         createInfo.ppEnabledExtensionNames = extensions.data();
@@ -413,6 +512,9 @@ private:
 
 
         VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
+        // debug messenger에는 문제가 하나 있다. 바로 instance가 생성된 이후에 debug messenger가 생성돼야 하기 때문에
+        // instance생성에 대한 debug는 불가능 하다는 것이다. 이를 위해서 instance를 생성할 때, DebugMessengerCreateInfo를 선언하고
+        // instance생성용 createInfo의 pNext필드에 해당 debugCreateInfo를 미리 전해줘서 create할 때의 debug log를 전송받을 수 있다.
         if (enableValidationlayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
@@ -437,10 +539,14 @@ private:
 
     void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo) {
         createInfo = {};
-        createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT; 
         createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
         createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         createInfo.pfnUserCallback = debugCallback;
+        // 어떤 타입의 메세지를 만들고 콜백함수로는 뭘 지정할지에 대한 정보를 담는 함수
+
+        // 추가로 pUserData필드를 추가 할 수 있다.
+        // 해당 필드는 callback함수에서 정의한 pUserData를 통해 얻어온 데이터를 어떤 변수가 받을지에 대한 포인터이다.
     }
 
     void setupDebugMessanger() {
@@ -450,7 +556,10 @@ private:
 
         VkDebugUtilsMessengerCreateInfoEXT createInfo{};
         populateDebugMessengerCreateInfo(createInfo);
+        // 어떤 debug messenger를 보낼지에 대한 struct
 
+        // vulkan에선, debugmessenger마저 handle을 이용해 명시적으로 생성해주고 파괴해줘야 한다.
+        // 이를 위해서 class멤버로 debugMessenger를 선언해줘야 한다.
         if (CreateDeubgUtilMessengerEXT(instance, &createInfo, nullptr, &debugMessenger) != VK_SUCCESS) {
             throw std::runtime_error("failed to set up debug messenger!");
         }

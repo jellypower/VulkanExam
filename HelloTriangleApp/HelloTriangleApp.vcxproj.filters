@@ -13,10 +13,27 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="리소스 파일\shader">
+      <UniqueIdentifier>{a9116490-9320-4a67-b388-830aba864b63}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="리소스 파일\batch">
+      <UniqueIdentifier>{73d0b075-15d3-45fa-b1a0-4f0513cf839c}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="HelloTriangleApp.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="shader.frag">
+      <Filter>리소스 파일\shader</Filter>
+    </None>
+    <None Include="shader.vert">
+      <Filter>리소스 파일\shader</Filter>
+    </None>
+    <None Include="compile.bat">
+      <Filter>리소스 파일\batch</Filter>
+    </None>
   </ItemGroup>
 </Project>
