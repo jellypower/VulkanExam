@@ -246,6 +246,74 @@ private:
 
         // 오래된 그래픽 api들은 그래픽파이프라인의 대부분의 stage를 default로 제공했다.
         // 그러나, vulkan은 파이프라인을 immutable(불변하는)한 pipeline state object로 만들어야 한다.
+        // 대부분의 파이프라인 state는 변경 불가능하지만 viewport size, line width, blend constant등등은 변경 가능하다.
+        // 이를 위해선 VkPipelineDynamicStateCreateInfo를 써야한다.
+        std::vector<VkDynamicState> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+        // 이렇게 세팅하면 viewport랑 scissor state가 flexible해지면서도 complex해짐
+
+
+        // VkPipelineVertexInputStateCreateInfo는 vertex shader에 보내질 vertex의 format을 기술함
+            // 1. Bindings: 데이터간의 spacing, 정점별 데이터인지 \
+            // 인스턴스별 데이터인지(geometry instancing: 똑같은 mesh를 하나의 화면에 여러개 그리는 것 => 나뭇잎, 관절(팔))
+            // 2. Attribute discription: vertex shader로 보내지는attribute의 type, 바인딩을 로드하기 위한 오프셋
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 0;
+        vertexInputInfo.pVertexBindingDescriptions = nullptr; // Optional
+        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+        vertexInputInfo.pVertexAttributeDescriptions = nullptr; // Optional
+        // pVertexBindingDescriptions 랑 pVertexAttributeDescriptions멤버는 struct array에 대한 포인터이다.
+        // 그리고 앞서 말했던 것처럼 load할 vertex data들의 detail에 대한 정보를 담고있다.
+
+
+        // VkPipelineInputAssemblyStateCreateInfo는 2개의 정보를 기술하는 struct이다
+            // 1. 어떤 형태의 geometry가 그려질 것인지 (topology 멤버변수)
+                // point, line, line_strip, triangle, tirangle_strip
+                // strip은 vertex를 연속적으로 그려서 vertex의 정보를 아끼는 것
+            // 2. primitive restart를 활성화 할지
+                // restart를 VK_TRUE로 enable하면 element buffer를 사용 가능하다.
+                // 라인이나 triangle을 쪼개서 _STRIP 모드와 0xFFFF 혹은 0xFFFFFFFF 같은 index를 특별한 인덱스를 통해 다시 그릴 수 있다.
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        // viewport: output이 렌더링 될 frameBuffer의 영역. 대부분 (0, 0)에서 (width, height) 까지의 영역을 커버
+        VkViewport viewport{};
+        viewport.x = 0;
+        viewport.y = 0;
+        viewport.width = (float)swapChainExtent.width; // 스왑체인의 사이즈랑 window의 사이즈가 다를 수 있다는 것을 알고있자
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f; // minDepth랑 maxDepth는 frameBuffer에서 사용될 range를 표현한다. 둘 다 0.0~1.0 사이여야 한다.
+        viewport.maxDepth = 1.0f;
+
+        // scissor: viewport가 image에서 frambuffer로 transformation을 정의한다면 scissor는 어느 pixel의 region이 실제로
+        // 저장될지에 대해 정의한다. scissor밖의 rectangle들은 rasterizer에 의해 사라지며 transformation보다는 function
+        // 과 같은 역할을 한다.
+        VkRect2D scissor{};
+        scissor.offset = { 0,0 };
+        scissor.extent = swapChainExtent;
+
+        // viewport랑 scissor는 모두 static/dynamic state가 모두 될 수 있다.
+        // static이 구현할 때 좀 편하기는 하지만 유연성을 위해 dynamic으로 두는게 종종 편하다. 성능 저하도 없다.
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.pViewports = &viewport;
+        viewportState.scissorCount = 1;
+        viewportState.pScissors = &scissor;
+
+        //https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions
+        //여기서부터
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& code) {
