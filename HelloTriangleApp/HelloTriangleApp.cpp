@@ -312,8 +312,47 @@ private:
         viewportState.scissorCount = 1;
         viewportState.pScissors = &scissor;
 
-        //https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions
-        //여기서부터
+        
+        // depth testing, face culling, scissor test와 같은 설정 가능
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        // true로 설정하면 near/far plan넘어에 있는 fragment들이 discar되지 않고 clamp됨, 섀도우맵 등에 활용하기에 좋음
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        // true면 geometry정보가 rasterize stage에 넘어가지 않음. framebuffer에 대한 output을 전부 disable함
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        // _FILL: polygon의 fragment를 채움, _LINE: polygon의 edge가 line으로 그려짐, _POINT: polygon의 edge가 point로 그려짐
+        rasterizer.lineWidth = 1.0f;
+        // line의 width를 말한다. maximum line width는 기기마다 다르고 1.0보다 굵은 라인은 wideLine GPU feature가 enable돼야 한다.
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+        // back face culling을 사용할지 
+        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        // front face인지 검사하기 위한 vertex order의 순서를 정의함. clockwise와 counterclockwise가 있음
+        
+        rasterizer.depthBiasEnable = VK_FALSE;
+        rasterizer.depthBiasConstantFactor = 0.0f; // Optional
+        rasterizer.depthBiasClamp = 0.0f; // Optional
+        rasterizer.depthBiasSlopeFactor = 0.0f; // Optional
+        // shadow mapping을 위해 bias나 slope를 정해줄 수 있지만 지금은 안쓰니까 패스
+
+
+        // multi sampling을 지원함, anti-aliasing용,
+        // multiple polygons의 프래그먼트 셰이더 결과를 결합하여 사용 가능
+        // 보통 edge를 따라서 작동
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisampling.minSampleShading = 1.0f; //optional
+        multisampling.pSampleMask = nullptr; //optional
+        multisampling.alphaToCoverageEnable = VK_FALSE; //optional
+        multisampling.alphaToOneEnable = VK_FALSE;  //optional
+
+
+        // https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions
+        // 여기부터
+
+
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& code) {
