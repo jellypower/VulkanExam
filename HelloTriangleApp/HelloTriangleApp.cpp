@@ -83,6 +83,10 @@ private:
     VkExtent2D swapChainExtent;
     std::vector<VkImageView> swapChainImageViews;
 
+    // 파이프라인을 통해 uniform변수의 값을 바꿔주는 등의 셰이더, vertex 데이터 접근 가능
+    VkPipelineLayout pipelineLayout;
+
+
 
     const uint32_t WIDTH = 800;
     const uint32_t HEIGHT = 600;
@@ -91,6 +95,7 @@ private:
     const std::vector<const char*> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+
 
     VkDevice device;
     VkQueue graphicsQueue;
@@ -234,14 +239,15 @@ private:
         fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         fragShaderStageInfo.module = fragShaderModule;
         fragShaderStageInfo.pName = "main";
+        
 
         VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
         
 
-        vkDestroyShaderModule(device, fragShaderModule, nullptr); 
-        vkDestroyShaderModule(device, vertShaderModule, nullptr);
-        // SPIR-V byte code를 GPU에 맞는 machine code로 바꾸기 위해선 파이프라인이 만들어져야 한다.
-        // 그 말인 즉슨, 파이프라인이 만들어지면 이미 machine code가 생겨 shaderModule은 필요가 없어진다. 
+
+
+        // =========================================== fixed functions =================================================
+
 
 
         // 오래된 그래픽 api들은 그래픽파이프라인의 대부분의 stage를 default로 제공했다.
@@ -263,7 +269,7 @@ private:
         // VkPipelineVertexInputStateCreateInfo는 vertex shader에 보내질 vertex의 format을 기술함
             // 1. Bindings: 데이터간의 spacing, 정점별 데이터인지 \
             // 인스턴스별 데이터인지(geometry instancing: 똑같은 mesh를 하나의 화면에 여러개 그리는 것 => 나뭇잎, 관절(팔))
-            // 2. Attribute discription: vertex shader로 보내지는attribute의 type, 바인딩을 로드하기 위한 오프셋
+            // 2. Attribute discription: vertex shader로 보내지는 attribute의 type, 바인딩을 로드하기 위한 오프셋
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         vertexInputInfo.vertexBindingDescriptionCount = 0;
@@ -349,10 +355,77 @@ private:
         multisampling.alphaToOneEnable = VK_FALSE;  //optional
 
 
-        // https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions
+        // VkPipelineDepthStencilStateCreateInfo를 통해 depth/stancil buffer도 설정할 수 있지만 지금은 안쓸것이므로 패스
+
+        // Color blending
+        // fragment shader결과가 나온 이후 color들은 combine돼야 할 필요가 있다. color blending에는 두 종류가 있다.
+            // 1. old color랑 new color를 섞는다.
+            // 2. bitwise operation을 이용해 old color와 new color를 조합한다.
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{}; // framebuffer마다 붙는 configuration
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
+            | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_FALSE;
+        // blend enable이 false이면 그냥 새로운 컬러가 덮어씌워지는 형식으로 rendering 된다.
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; 
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        // 위와 같이 blend color를 조합 가능하다. 이를 코드로 본다면
+        /*if (blendEnable) {
+            finalColor.rgb = (srcColorBlendFactor * newColor.rgb) < colorBlendOp > (dstColorBlendFactor * oldColor.rgb);
+            finalColor.a = (srcAlphaBlendFactor * newColor.a) < alphaBlendOp > (dstAlphaBlendFactor * oldColor.a);
+        }
+        else {
+            finalColor = newColor;
+        }
+        
+        finalColor = finalColor & colorWriteMask;
+
+        */ // 이와 유사한 느낌이다.
+        // 실제 어떤 channel만 pass through할지 결정하기 위해 colorWriteMask를 bitwise 연산 해준다. (어떤 bitwise인지는 blendstateinfo에 저장됨
+        // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkBlendFactor.html => 실제 enum의 의미들
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        // framebuffer별로 blend attachment state를 지정 가능하며 지정한 연산을 실제 수행해 주기 위해선 logicOnEnable을 VK_TRUE로 줘야한다.
+        colorBlending.logicOp = VK_LOGIC_OP_COPY;
+        // 함수의 마지막 bitwise operation을 정해준다.
+        // blend 모두를 전부 disable하면 수정되지 않은채로 값이 framebuffer에 올라온다.
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+        colorBlending.blendConstants[0] = 0.0f;
+        colorBlending.blendConstants[1] = 0.0f;
+        colorBlending.blendConstants[2] = 0.0f;
+        colorBlending.blendConstants[3] = 0.0f;
+        
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 0;
+        pipelineLayoutInfo.pSetLayouts = nullptr;
+        pipelineLayoutInfo.pushConstantRangeCount = 0;
+        pipelineLayoutInfo.pPushConstantRanges = nullptr;
+
+        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create pipeline layout!");
+        }
+        // 위처럼 fixed functions기반의 파이프라인을 설정하면 unexpected behavior가 생기는 것을
+        // 방지할 수 있다.
+        // ================================== fixed functions (end) ============================================
+
+
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Render_passes
         // 여기부터
 
 
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+        // SPIR-V byte code를 GPU에 맞는 machine code로 바꾸기 위해선 파이프라인이 만들어져야 한다.
+        // 그 말인 즉슨, 파이프라인이 만들어지면 이미 machine code가 생겨 shaderModule은 필요가 없어진다. 
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& code) {
@@ -419,6 +492,7 @@ private:
         SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
 
         VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+        //surface format에 대한 설명은 chooseSwapSurfaceFormat에 달려있음
         // surface는 window창과 대응되는 개념
         VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
         VkExtent2D extent = choosSwapExtent(swapChainSupport.capabilities);
@@ -884,6 +958,8 @@ private:
     }
 
     void cleanup() {
+
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 
         for (auto imageView : swapChainImageViews) {
             vkDestroyImageView(device, imageView, nullptr);
