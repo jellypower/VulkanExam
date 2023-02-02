@@ -14,6 +14,10 @@
 #include <string>
 #include <fstream>
 
+
+// https://stackoverflow.com/questions/39557141/what-is-the-difference-between-framebuffer-and-image-in-vulkan
+// 공부 자료
+
 VkResult CreateDeubgUtilMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
     auto func =
@@ -81,13 +85,13 @@ private:
     std::vector<VkImage> swapChainImages;
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
-    std::vector<VkImageView> swapChainImageViews;
+    std::vector<VkImageView> swapChainImageViews; // VkImageView의 각각의 element는 각각의 최종 output attachment와 대응된다.
 
     // 파이프라인을 통해 uniform변수의 값을 바꿔주는 등의 셰이더, vertex 데이터 접근 가능
     VkRenderPass renderPass;
     VkPipelineLayout pipelineLayout;
 
-
+    std::vector<VkFramebuffer> swapChainFrameBuffers;
 
 
 
@@ -106,6 +110,8 @@ private:
     // 생성만 되고 우리가 이에 대한 handle을 아직 가지고 있지 않기 때문에
     // 이를 명시적으로 가져와 줘야 한다.
     VkQueue presentQueue;
+
+    VkPipeline graphicsPipeline;
 
 
 #ifdef NDEBUG
@@ -209,6 +215,36 @@ private:
         createImageViews();
         createRenderPass();
         createGraphicsPipeline();
+        createFrameBuffers();
+    }
+
+    void createFrameBuffers() {
+        // 하나의 framebuffer 오브젝트는 모든 VkImageView에 대해 레퍼런스 한다.
+        // 각각의 VkImageView는 각각의 attachment에 대응된다.
+        // 지금과 같은 경우에 attachment에 사용해야 하는 이미지는 어느 이미지를 swapchain에 반환해야 하는지에 달려있다.
+        // 이것은 우리가 모든 이미지에 대해 framebuffer를 생성하고 drawing time에 추출된 이미지에 해당하는 프레임 버퍼를 가져오면
+        //된다.
+        swapChainFrameBuffers.resize(swapChainImageViews.size());
+
+        for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+            VkImageView attachments[] = {
+                swapChainImageViews[i]
+            };
+
+            VkFramebufferCreateInfo framebufferInfo{};
+            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebufferInfo.renderPass = renderPass; // frame buffer가 어느 렌더패스에 대응되는지 정의
+            framebufferInfo.attachmentCount = 1; 
+            framebufferInfo.pAttachments = attachments; // attachment description에 바인딩돼야 하는 imageView 객체들 지정
+            framebufferInfo.width = swapChainExtent.width;
+            framebufferInfo.height = swapChainExtent.height; 
+            framebufferInfo.layers = 1; // image array의 개수
+
+            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFrameBuffers[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create framebuffer!");
+            }
+        }
+        
     }
 
     void createRenderPass() {
@@ -216,12 +252,28 @@ private:
 //================================================= attachment =======================================================
 //Render-pass: 우리가 직접 정의한 drawing command의 일반적인 정의을 의미함.
 //그리고 drawing command는 렌더링 과정에서 어떤 리소스를 사용하는가에 따라 나뉨
+//
 // 
 //Sub-pass: 각각의 render pass는 하나 이상의 과정을 거치는데 이러한 각 과정들을 sub-pass라고 부름
-//렌더패스의 리소스는 렌더 타겟(color, depth/stancil, resolve)과 input data(같은 렌더 패스의 이전 sub-pass의 결과 등을 포함)
-//가 있음
+//         가령, 디퍼드 렌더링을 위해선 G-buffer생성을 위한 Depth 렌더링, 그림자 처리를 위한 Shadow-Depth,
+//         G-buffer생성을 통한 Albedo, Normal값 출력, 디퍼드 렌더링의 Light처리 각각이 sub pass가 될 수 있다.
+//         https://lifeisforu.tistory.com/462
+//
 // 
-//Attachment: 이러한 렌더패스의 리소스들을 의미하는 것이 바로 attachment임, 셰이더의 in, out으로 나오는 변수들 포함
+//Attachment: 
+// 렌더패스의 리소스는 렌더 타겟(color, depth/stancil, resolve)과 input data(같은 렌더 패스의 이전 sub-pass의 결과 등을 포함)
+// 가 있음 이러한 렌더패스의 리소스들을 의미하는 것이 바로 attachment임(discriptor, texture, sampler들을 포함하지 않는 개념)
+//          attachment는 여러개의 type이 있음
+//              1) Color / Depth Attachment: 여기에 무언가를 그리고 나중에 이놈들로부터 읽어올 수 있음. output임
+//              2) Input Attachment: 이놈들은 output이 아닌 input으로 사용됨. 가령 디퍼드 렌더링의 G-Buffer를 예로 들 수 있음
+//                  G-Buffer에는 albedo, normal, depth등의 이미지를 그릴텐데 일단 subpass가 끝나면 다른 서브패스를 실행
+//                  가능한데 이러한 input attachment를 input으로 줄 수 있다.
+//                  
+//                  Sampler와 attachment의 차이는 원하는 주소를 직접 addressable하지 못한다는 것이다. 현재 작업하고 있는
+//                  픽셀에 대한 데이터만 접근 가능하다. 그리고 이건 드라이버가 자체적으로 최적화 하기에 좋은 기회를 준다.
+//https://stackoverflow.com/questions/46384007/what-is-the-meaning-of-attachment-when-speaking-about-the-vulkan-api          
+//https://lifeisforu.tistory.com/462
+// https://lifeisforu.tistory.com/category/Vulkan%20%26%20OpenGL 
 // 
         // pipeline을 만들기 전에, 우리는 vulkan에게 렌더링과정에서 사용될 framebuffer attachment가 무엇이 있는지 
         // 알려야 한다. 얼마나 많은 color/depth buffer가 있는지, 얼마나 많은 샘플들이 사용될지
@@ -237,7 +289,7 @@ private:
         // multisampling을 지금은 안쓰고 있기 때문에 샘플링은 1번
         colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        // loadOp와 storeOp는 렌더링 전후에 attachment에서 뭘 할지를 결정한다.
+        // loadOp와 storeOp는 렌더링 전후에 attachment에서 뭘 할지를 결정한다.(렌더패스의 시작과 끝에서 어떤 operation을 할지 결정)
         // VK_ATTACHMENT_LOAD_OP_LOAD: attachment의 exixting contents를 보존한다.
         // VK_ATTACHMENT_LOAD_OP_CLEAR: 시작시에 attachment의 값을 clear한다
         // VK_ATTACHMENT_LOAD_OP_DONT_CARE : existing contents가 정의돼있지 않다. existing contents를 신경쓰지 않는다.
@@ -284,6 +336,8 @@ private:
         // 해당 서브패스가 시작하면 attachment의 layout을 이것으로 바꿈
 
 
+        
+
         //sub-pass 정의
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -296,6 +350,7 @@ private:
             //pResolveAttachments: 멀티샘플링에 사용되는 attachment들
             //pDepthStencilAttachment : stencil데이터용 attachment들
             //pPreserveAttachments : subpass에서 사용되진 않지만 보존돼야 하는 데이터들
+
 
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -354,20 +409,6 @@ private:
 
 
 
-        // 오래된 그래픽 api들은 그래픽파이프라인의 대부분의 stage를 default로 제공했다.
-        // 그러나, vulkan은 파이프라인을 immutable(불변하는)한 pipeline state object로 만들어야 한다.
-        // 대부분의 파이프라인 state는 변경 불가능하지만 viewport size, line width, blend constant등등은 변경 가능하다.
-        // 이를 위해선 VkPipelineDynamicStateCreateInfo를 써야한다.
-        std::vector<VkDynamicState> dynamicStates = {
-            VK_DYNAMIC_STATE_VIEWPORT,
-            VK_DYNAMIC_STATE_SCISSOR
-        };
-
-        VkPipelineDynamicStateCreateInfo dynamicState{};
-        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-        dynamicState.pDynamicStates = dynamicStates.data();
-        // 이렇게 세팅하면 viewport랑 scissor state가 flexible해지면서도 complex해짐
 
 
         // VkPipelineVertexInputStateCreateInfo는 vertex shader에 보내질 vertex의 format을 기술함
@@ -427,7 +468,7 @@ private:
         VkPipelineRasterizationStateCreateInfo rasterizer{};
         rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rasterizer.depthClampEnable = VK_FALSE;
-        // true로 설정하면 near/far plan너머에 있는 fragment들이 discar되지 않고 clamp됨, 섀도우맵 등에 활용하기에 좋음
+        // true로 설정하면 near/far plan너머에 있는 fragment들이 discard되지 않고 clamp됨, 섀도우맵 등에 활용하기에 좋음
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         // true면 geometry정보가 rasterize stage에 넘어가지 않음. framebuffer에 대한 output을 전부 disable함
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
@@ -517,6 +558,23 @@ private:
         pipelineLayoutInfo.pushConstantRangeCount = 0;
         pipelineLayoutInfo.pPushConstantRanges = nullptr;
 
+
+
+        // 오래된 그래픽 api들은 그래픽파이프라인의 대부분의 stage를 default로 제공했다.
+        // 그러나, vulkan은 파이프라인을 immutable(불변하는)한 pipeline state object로 만들어야 한다.
+        // 대부분의 파이프라인 state는 변경 불가능하지만 viewport size, line width, blend constant등등은 변경 가능하다.
+        // 이를 위해선 VkPipelineDynamicStateCreateInfo를 써야한다.
+        std::vector<VkDynamicState> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+        // 이렇게 세팅하면 viewport랑 scissor state가 flexible해지면서도 complex해짐
+
         // 일단 지금은 사용하지 않을 것이므로 pipelineLayout변수가 비어있도록 pipelineLayoutCreateInfo를 설정해
         // 비어있는 pipelineLayout 로컬 변수를 정의해줄 것이다.
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
@@ -533,10 +591,44 @@ private:
 
 
         
-        //여기부터
-        //https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Conclusion
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = nullptr; // Optional
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+
+        pipelineInfo.layout = pipelineLayout;
+
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+        // 해당 파이프라인이 어떤 렌더패스를 쓰고 거기서도 어떤 서브패스를 사용할지 결정
+        // 이 파이프라인은 렌더패스와 in, out 폼이 호환돼야 함
+
+        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
+        pipelineInfo.basePipelineIndex = -1; // Optional
+        // 파이프라인은 이미 존재하는 파이프라인에서 derived된 파이프라인을 생성 할 수 있다(상속처럼)
+        // 기능에 많은 공통점이 있을 때 파이프라인을 셋업하고 교체하는 과정이 저렴해집니다.
+        // basePipelineHandle으로 핸들을 넘겨줘서 생성할 수도 있고 basePipelineIndex를 이용해 인덱스로
+        // 생성하려고 하는 다른 파이프라인을 참조할 수도 있습니다.
+        // VkGraphicsPipelineCreateInfo에서 VK_PIPELINE_CREATE_DERIVATIVE_BIT플래그가 활성화 돼있으면 기능 사용 가능
 
 
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create graphics pipeline!");
+        }
+        // vkCreateGraphicsPipelines함수는 multiple파이프라인을 생성하는 것이 목표라 파라미터가 좀 더 많음
+        // VK_NULL_HANDLE 인자가 들어간 두 번째 파라미터는 VkPipelineCache오브젝트를 레퍼런스함
+        // 파이프라인 캐시는 파이프라인 생성에 관한 데이터 재사용/저장에 사용될 수 있고 심지어는 캐시가 파일로
+        // 저장되면 프로그램 넘어서도 도움을 줄 수 있음.
+        // 이건 파이프라인 생성속도를 상당히 높여줄 수 있음
 
 
         vkDestroyShaderModule(device, fragShaderModule, nullptr);
@@ -1082,7 +1174,12 @@ private:
     }
 
     void cleanup() {
-        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+
+        for (auto framebuffer : swapChainFrameBuffers) {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 
         for (auto imageView : swapChainImageViews) {
