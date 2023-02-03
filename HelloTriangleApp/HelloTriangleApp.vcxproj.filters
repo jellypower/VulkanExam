@@ -24,9 +24,6 @@
     <ClCompile Include="HelloTriangleApp.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="HelloTriangleWithoutRemark.cpp">
-      <Filter>소스 파일</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="compile.bat">

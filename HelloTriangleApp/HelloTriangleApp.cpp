@@ -78,9 +78,12 @@ private:
 
     GLFWwindow* window;
     VkInstance instance;
-    VkDebugUtilsMessengerEXT debugMessenger;
     // vulkan에선, debugmessenger마저 handle을 이용해 명시적으로 생성해주고 파괴해줘야 한다.
     // 이를 위해서 class멤버로 debugMessenger를 선언해줘야 한다.
+    VkDebugUtilsMessengerEXT debugMessenger;
+
+    // vulkan은 플랫폼에 독립적(agnostic)하기 때문에 glfw가 만든 windw에 바로 접근하지 못하고 window에 접근하기 위한
+    // 별도의 surface레이어가 필요로 된다.
     VkSurfaceKHR surface;
     VkSwapchainKHR swapChain;
     std::vector<VkImage> swapChainImages;
@@ -223,6 +226,13 @@ private:
         createFrameBuffers();
         createCommandPool();
         createCommandBuffer();
+
+        // VkDeviceMemory: 그냥 V-RAM에 메모리를 할당하는 것
+        // VkImage: 해당 메모리에 포맷에 대한 정의를 기술하는 것. (ex. 이미지는 2D이고, 포맷은R8G8B8, extent는 2*2 등등)
+        // VkImageView: VkImage의 어느 부분을 사용할지 기술함. incompatiable한 interface의 포맷을 맞춰주는 역할도 할 수 있음
+        // Framebuffer: VkImageView와 렌더패스로부터 출력된 attachment를 bind해주는 역할을 수행함.
+        // VkRenderPass: 어느 attachment가 그려질지를 결정함.
+
     }
 
     void createCommandBuffer() {
@@ -236,6 +246,7 @@ private:
         // VK_COMMAND_BUFFER_LEVEL_SECONDARY: 곧바로 execution을 위해 큐에 전송될 순 없음. 그러나, primary command buffer들로부터는 호출 될 수 있음
         allocInfo.commandBufferCount = 1;
         // 지금같은 경우에는 secondary command buffer를 만들진 않을거지만, common operation을 재사용 하는데 secondary command buffer는 큰 도움이 될 수 있음
+        // 지금같은 경우에는 커맨드 버퍼를 하나만 만들거임
 
         if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
@@ -244,14 +255,84 @@ private:
 
     }
     
+    
+    
+    // commandBuffer파라미터를 해당 함수에 패스해서 쓰기를 시작할거임
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
-        VkCommandBufferBeginInfo beginInfo{};
+
+
+        VkCommandBufferBeginInfo beginInfo{}; // 커맨드 버퍼에 쓰기 위해선 해당 struct를 만들어 줘야함
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = 0;
+        // VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: 커맨드 버퍼의 각각의 recording은 한 번만 보내집니다. 
+        // 그리고 나서 커맨드 버퍼는 각 submission간에 다시 리셋되고 기록됩니다.
+        // VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT: 만약 해당 버퍼가 secondary command buffer라면
+        // 커맨드 버퍼는 완전히 렌더 패스 안에 있는 것으로 인식됩니다. primary라면 무시됩니다.
+        // VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT: 커맨드 버퍼는 pending state에 있을 때 큐에 재전송될
+        // 수 있습니다. 그리고 여러개의 프라이머리 커맨드 버퍼에 기록될 수 있습니다.
         beginInfo.pInheritanceInfo = nullptr;
+        // secondary command 버퍼만 사용할 수 있는 optional한 파라미터이며 primary command buffer에서 어떤 상태를 
+        // 상속받을지를 결정합니다.
 
         if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
             throw std::runtime_error("failed to begin recording command buffer!");
+        }
+
+        // vkCmdBeginRenderPass로 렌더패스를 시작하면 그리기를 시작한다.
+        // 렌더패스는 VkRenderPassBeginInfo구조체로 시작할 수 있다.
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = renderPass; // 어떤 렌더 패스를 이용할지 결정
+        renderPassInfo.framebuffer = swapChainFrameBuffers[imageIndex];
+        // 위에서 생성했던 (이미지에 이미지 뷰를 통해 바인딩된)프레임버퍼들 렌더패스에 직접 바인딩함으로써 렌더패스 시작 => 즉, 렌더 타겟 설정!
+        renderPassInfo.renderArea.offset = { 0, 0 };
+        renderPassInfo.renderArea.extent = swapChainExtent;
+        // 셰이더가 로드되고 저장되는 위치를 정의함. 이 영역 밖의 region은 정의되지 않지만 attachment size랑 동일하게 설정하는게 best
+
+        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
+        //VK_ATTACHMENT_LOAD_OP_CLEAR에서 정의했던 clear operation을 위해 쓰일 것이다. => (0,0,0,1)이면 black으로 클리어 =>뒷배경이 black
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearColor;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        // 이러면 이제 렌더패스가 시작된다. command를 record하는 함수들은 전부 vkCmd prefix가 붙는다.
+        // 그리고 전부 void를 리턴한다. => 실제 recording이 끝날 때까진 에러가 생기지 않기때문에
+        // VK_SUBPASS_CONTENTS_INLINE: 렌더패스 커맨드가 primary command buffer에 임베드 되고 secondary command buffer는 쓰지 않음
+        // VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS: 렌더 패스 command가 secondary command buffer에서 실행됨
+
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        // 두 번째 파라미터를 통해 파이프라인이 그래픽스용인지 compute shade용인지 기술해줌
+
+
+        // 파이프라인에서 viewport랑 scissor설정을 dynamic으로 해줬기 때문에 drawcall을 내기 전에
+        // 커맨드버퍼의 뷰포트 사이즈를 정의해줘야 함
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(swapChainExtent.width);
+        viewport.height = static_cast<float>(swapChainExtent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        // vertexCount: vertex의 개수가 몇 개인지
+        // instanceCount: instanced rendering을 위해 사용. 지금은 안쓰니까 1
+        // firstVertex: vulkan은 opencl과 같이 spir-v를 쓰기 때문에 in변수의 이름을 지정해서
+        //              데이터가 전송되는 것이 아닌 gl_vertexIndex를 이용해 직접 접근함
+        // firstInstance: instanced rendering을 위해 쓰임. gl_InstanceIndex가 최소값임
+
+
+        vkCmdEndRenderPass(commandBuffer);
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to record command buffer!");
         }
     }
 
@@ -298,7 +379,7 @@ private:
 
         for (size_t i = 0; i < swapChainImageViews.size(); i++) {
             VkImageView attachments[] = {
-                swapChainImageViews[i]
+                swapChainImageViews[i] // 일련의 image view를 하나의 frame buffer에 넣는다.
             };
 
             VkFramebufferCreateInfo framebufferInfo{};
@@ -353,6 +434,7 @@ private:
         // single color buffer attachment를 만들 것이다.
         VkAttachmentDescription colorAttachment{}; // => fragment shader의 "layout(location = 0) out vec4 outColor" 에 대응됨
         colorAttachment.format = swapChainImageFormat;
+
         
         // color attachment의 format은 swap chain image의 format과 동일해야 함
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -639,6 +721,7 @@ private:
             VK_DYNAMIC_STATE_SCISSOR
         };
 
+
         VkPipelineDynamicStateCreateInfo dynamicState{};
         dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
         dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
@@ -748,7 +831,7 @@ private:
             createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
 
             // subresourceRange필드는 이미지를 사용하는 목표, 이미지의 어느 부분이 접근 가능한지 등을 기술한다. 
-            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;;
             createInfo.subresourceRange.baseMipLevel = 0;
             createInfo.subresourceRange.levelCount = 1;
             createInfo.subresourceRange.baseArrayLayer = 0;
