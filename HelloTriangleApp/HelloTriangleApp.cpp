@@ -42,6 +42,7 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
 
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
+        
     }
 }
 
@@ -92,8 +93,10 @@ private:
     VkPipelineLayout pipelineLayout;
 
     std::vector<VkFramebuffer> swapChainFrameBuffers;
+    
+    VkCommandPool commandPool;
 
-
+    VkCommandBuffer commandBuffer;
 
     const uint32_t WIDTH = 800;
     const uint32_t HEIGHT = 600;
@@ -114,6 +117,7 @@ private:
     VkPipeline graphicsPipeline;
 
 
+
 #ifdef NDEBUG
     const bool enableValidationlayers = false;
 #else
@@ -128,6 +132,7 @@ private:
         std::vector<VkLayerProperties> availableLayers(layerCount);
         vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
+        
 
         std::cout << "\n\n";
 
@@ -216,6 +221,71 @@ private:
         createRenderPass();
         createGraphicsPipeline();
         createFrameBuffers();
+        createCommandPool();
+        createCommandBuffer();
+    }
+
+    void createCommandBuffer() {
+
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = commandPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        // VK_COMMAND_BUFFER_LEVEL_PRIMARY: 해당 commandBuffer는 execution을 위해 다른 큐에 전송될 수 있음. 그러나 다른 command buffer들로부터
+        // 호출되는 것은 불가능
+        // VK_COMMAND_BUFFER_LEVEL_SECONDARY: 곧바로 execution을 위해 큐에 전송될 순 없음. 그러나, primary command buffer들로부터는 호출 될 수 있음
+        allocInfo.commandBufferCount = 1;
+        // 지금같은 경우에는 secondary command buffer를 만들진 않을거지만, common operation을 재사용 하는데 secondary command buffer는 큰 도움이 될 수 있음
+
+        if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate command buffers!");
+        }
+
+
+    }
+    
+    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = 0;
+        beginInfo.pInheritanceInfo = nullptr;
+
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("failed to begin recording command buffer!");
+        }
+    }
+
+    void createCommandPool() {
+        // Vulkan에서 drawing operation과 memory transfer같은 command는 function call을 통해 direct하게 바로바로 실행되는 게 아니라
+        // 모든 operation을 기록하고 한 번에 보내진다. 커맨드가 모여서 한 번에 보내지기 때문에 더 효율적으로 작동 할 수 있다.
+        // 게다가, 해당 커맨드는 멀티스레드에서 명령을 기록하게 만들 수도 있다.
+
+        // command pool: command buffer를 만들기 전에 command pool을 만들어야 한다. 
+        // 커맨들 풀은 버퍼를 저장하고 할당되는 메모리 자체를 manage한다.
+
+        QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice);
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        // VK_COMMAND_POOL_CREATE_TRANSIENT_BIT: 커맨드 풀으로부터 할당된 command buffer가 짧은 life time을 가지게 한다.
+        // 커맨드 버퍼가 짧은 시간 내에 reset, free 될 수 있음을 의미한다. 보통 풀 내에서의 메모리 할당을 구현하기 위해 사용된다.
+        // VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: 해당 풀으로부터 할단된 어떤 커맨드 버퍼든 개별적으로 initial state로 돌아갈
+        // 수 있고 기록될 수 있게 한다.(가령 vkResetCommandBuffer를 호출하거나, vkBeginCommandBuffer가 호출되면 암시적으로) 해당 플래그가 없으면
+        // 커맨드 버퍼들은 다 같이 reset돼야 한다.
+
+        // 우리는 command buffe가 매 프레임마다 기록되길 원하기 때문에 두 번째 flag만 활성화 한다.
+        
+        // 커맨드 버퍼들은 지난번에 만든 (graphics, presentation)device queue들중에 하나에게 커맨드 버퍼를 전송함으로써 실행됨
+        // 각각의 command pool은 ""하나의 타입의 큐""(graphics용이든 presentation용이든)에 대해서만 command buffer들을 할당 할 수 있음
+        // 커맨드 풀은 큐마다 하나만 생성 가능하고 커맨드 버퍼는 커맨드 풀 하나에 여러개가 종속돼있음 커맨드 풀은 실제 메모리와 커맨드 버퍼를 매니징
+        // 우리는 drawing을 위한 command를 record할 것이기 때문에 graphics queue family를 골랐음
+        poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
+
+        if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create command pool!");
+        }
+
+
     }
 
     void createFrameBuffers() {
@@ -708,11 +778,15 @@ private:
 
 
         uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+        // image가 min만큼만 있으면 driver가 internal operation을 완료할 때까지 기다려야만 렌더할 image를 얻어올 수 있기 때문에
+        // 적어도 minimage보다 많아야 한다. 
 
 
         if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
             imageCount = swapChainSupport.capabilities.maxImageCount;
         }
+        // 그리고 imageCount가 maxImagecount보다 적게 만들어야 한다. 근데, maxImageCount == 0 이면 maximum이 정해져 있지 않는다는
+        // 뜻이기 때문에 이에 대한 예외처리가 필요하다. 
 
         VkSwapchainCreateInfoKHR createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -1026,6 +1100,7 @@ private:
 
         for (const auto& queueFamily : queueFamilies) {
 
+
             if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
                 indices.graphicsFamily = i;
             }
@@ -1174,6 +1249,8 @@ private:
     }
 
     void cleanup() {
+
+        vkDestroyCommandPool(device, commandPool, nullptr);
 
         for (auto framebuffer : swapChainFrameBuffers) {
             vkDestroyFramebuffer(device, framebuffer, nullptr);
