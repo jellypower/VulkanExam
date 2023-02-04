@@ -228,7 +228,8 @@ private:
         createCommandBuffer();
 
         // VkDeviceMemory: 그냥 V-RAM에 메모리를 할당하는 것
-        // VkImage: 해당 메모리에 포맷에 대한 정의를 기술하는 것. (ex. 이미지는 2D이고, 포맷은R8G8B8, extent는 2*2 등등)
+        // VkImage: 해당 메모리를 어떻게 swapchain의 이미지로 사용하는지에 대한
+        //  포맷의 정의를 기술하는 것을 포함한 개념(스왑체인의 이미지를 대변함). (ex. 이미지는 2D이고, 포맷은R8G8B8, extent는 2*2 등등)
         // VkImageView: VkImage의 어느 부분을 사용할지 기술함. incompatiable한 interface의 포맷을 맞춰주는 역할도 할 수 있음
         // Framebuffer: VkImageView와 렌더패스로부터 출력된 attachment를 bind해주는 역할을 수행함.
         // VkRenderPass: 어느 attachment가 그려질지를 결정함.
@@ -257,85 +258,6 @@ private:
     
     
     
-    // commandBuffer파라미터를 해당 함수에 패스해서 쓰기를 시작할거임
-    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
-
-
-        VkCommandBufferBeginInfo beginInfo{}; // 커맨드 버퍼에 쓰기 위해선 해당 struct를 만들어 줘야함
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = 0;
-        // VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: 커맨드 버퍼의 각각의 recording은 한 번만 보내집니다. 
-        // 그리고 나서 커맨드 버퍼는 각 submission간에 다시 리셋되고 기록됩니다.
-        // VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT: 만약 해당 버퍼가 secondary command buffer라면
-        // 커맨드 버퍼는 완전히 렌더 패스 안에 있는 것으로 인식됩니다. primary라면 무시됩니다.
-        // VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT: 커맨드 버퍼는 pending state에 있을 때 큐에 재전송될
-        // 수 있습니다. 그리고 여러개의 프라이머리 커맨드 버퍼에 기록될 수 있습니다.
-        beginInfo.pInheritanceInfo = nullptr;
-        // secondary command 버퍼만 사용할 수 있는 optional한 파라미터이며 primary command buffer에서 어떤 상태를 
-        // 상속받을지를 결정합니다.
-
-        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-            throw std::runtime_error("failed to begin recording command buffer!");
-        }
-
-        // vkCmdBeginRenderPass로 렌더패스를 시작하면 그리기를 시작한다.
-        // 렌더패스는 VkRenderPassBeginInfo구조체로 시작할 수 있다.
-        VkRenderPassBeginInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = renderPass; // 어떤 렌더 패스를 이용할지 결정
-        renderPassInfo.framebuffer = swapChainFrameBuffers[imageIndex];
-        // 위에서 생성했던 (이미지에 이미지 뷰를 통해 바인딩된)프레임버퍼들 렌더패스에 직접 바인딩함으로써 렌더패스 시작 => 즉, 렌더 타겟 설정!
-        renderPassInfo.renderArea.offset = { 0, 0 };
-        renderPassInfo.renderArea.extent = swapChainExtent;
-        // 셰이더가 로드되고 저장되는 위치를 정의함. 이 영역 밖의 region은 정의되지 않지만 attachment size랑 동일하게 설정하는게 best
-
-        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
-        //VK_ATTACHMENT_LOAD_OP_CLEAR에서 정의했던 clear operation을 위해 쓰일 것이다. => (0,0,0,1)이면 black으로 클리어 =>뒷배경이 black
-        renderPassInfo.clearValueCount = 1;
-        renderPassInfo.pClearValues = &clearColor;
-
-        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        // 이러면 이제 렌더패스가 시작된다. command를 record하는 함수들은 전부 vkCmd prefix가 붙는다.
-        // 그리고 전부 void를 리턴한다. => 실제 recording이 끝날 때까진 에러가 생기지 않기때문에
-        // VK_SUBPASS_CONTENTS_INLINE: 렌더패스 커맨드가 primary command buffer에 임베드 되고 secondary command buffer는 쓰지 않음
-        // VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS: 렌더 패스 command가 secondary command buffer에서 실행됨
-
-
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-        // 두 번째 파라미터를 통해 파이프라인이 그래픽스용인지 compute shade용인지 기술해줌
-
-
-        // 파이프라인에서 viewport랑 scissor설정을 dynamic으로 해줬기 때문에 drawcall을 내기 전에
-        // 커맨드버퍼의 뷰포트 사이즈를 정의해줘야 함
-        VkViewport viewport{};
-        viewport.x = 0.0f;
-        viewport.y = 0.0f;
-        viewport.width = static_cast<float>(swapChainExtent.width);
-        viewport.height = static_cast<float>(swapChainExtent.height);
-        viewport.minDepth = 0.0f;
-        viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-        VkRect2D scissor{};
-        scissor.offset = { 0, 0 };
-        scissor.extent = swapChainExtent;
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-        // vertexCount: vertex의 개수가 몇 개인지
-        // instanceCount: instanced rendering을 위해 사용. 지금은 안쓰니까 1
-        // firstVertex: vulkan은 opencl과 같이 spir-v를 쓰기 때문에 in변수의 이름을 지정해서
-        //              데이터가 전송되는 것이 아닌 gl_vertexIndex를 이용해 직접 접근함
-        // firstInstance: instanced rendering을 위해 쓰임. gl_InstanceIndex가 최소값임
-
-
-        vkCmdEndRenderPass(commandBuffer);
-        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
-            throw std::runtime_error("failed to record command buffer!");
-        }
-    }
-
     void createCommandPool() {
         // Vulkan에서 drawing operation과 memory transfer같은 command는 function call을 통해 direct하게 바로바로 실행되는 게 아니라
         // 모든 operation을 기록하고 한 번에 보내진다. 커맨드가 모여서 한 번에 보내지기 때문에 더 효율적으로 작동 할 수 있다.
@@ -1323,13 +1245,173 @@ private:
 
 #pragma endregion
 
+
+#pragma region render loop
+
+    // high level단에서 vulkan은 common set of step으로 작동합니다.
+    // 1. 이전 프레임이 끝나기를 기다린다.
+    // 2. swap chain으로부터 이미지를 얻어온다.
+    // 3. 스왑체인으로부터 얻어온 이미지에 그림을 그릴 command buffer를 기록한다.
+    // 4. 기록된 command buffer를 전송한다.
+    // 5. 스왑체인 이미지를 present 한다.
+    //
+    // vulkan의 주요한 디자인 철학 중 하나는 바로 GPU에서의 동기화가 명시적이라는 것입니다.
+    // 실행순서는 드라이버에게 실행시키고 싶은 순서를 알려주는 다양한 동기화 요소들을 우리가 어떻게 정의하냐에 달렸습니다.
+    // 이 말인 즉슨, vulkan에서 작동하는 API call들은 동작이 완료되기 전에 리턴되는 비동기적인 동작방식을 가졌다는 것입니다. 
+    //      이번 챕터에서 우리가 명시적으로 순서를 정해야 하는 event들이 있습니다.
+    //      1) 이미지를 스왑체인으로부터 얻어오기
+    //      2) 얻어온 이미지에서 draw command를 실행하기
+    //      3) 이미지를 스크린에 present하고 다시 스왑체인에 반납하기
+    // 해당 명령들은 단일 function call이지만 비동기적입니다. 함수의 호출은 실제 동작이 되기 전에 끝나며 실행 순서는 정의되지 않습니다.
+    // 각각의 operation들이 이전 동작에 종속적이라는 것은 매우 안타까운 일이죠. 그러므로 우리는 우리가 원하는 실행 순서를
+    // 위해 어느 요소들을 사용 가능한지에 대해 살펴봅니다.  
+    //
+    // 1. 세마포어
+    // 세마포어는 queue operation 사이의 순서를 정해주기 위해 사용됩니다. 
+    // queue operation은 명령 함수 내부에서 혹은 커맨드 버퍼로부터 큐에 보내지는 작업들을 의미합니다. 이 부분은 나중에 살펴보겠습니다.
+    // 큐의 주된 예시로는 그래픽스 큐와 프레젠트 큐가 있습니다. 세마포어는 같은 큐 내부의 작업을 정렬하거나 
+    // 큐들 사이의 작업순서를 정렬하기 위해 사용됩니다. 
+    // 
+    // vulkan에선 두 가지의 세마포어가 있습니다. 바이너리와 타임라인입니다. 이번 예제에선 바이너리 세마포어만 활용해 보도록 하죠
+    // 사실은 타임라인에 대해선 이야기를 꺼낼 생각이 아직 없기에 그냥 앞으로 세마포어라 하면 그냥 바이너리 세마포어라고 생각해주시면
+    // 편하겠습니다.
+    // 
+    // 세마포어는 signaled이거나 unsignaled입니다. 이게 무슨 의미냐? 
+    // 모든 세마포어는 unsignaled로 시작합니다. 그리고 queue operation을 정렬하기 위해 세마포어를 사용하는 방법은 같은 세마포어를
+    // signal으로 둠으로써 다른 queue operation을 기다리게 하는 것입니다. 운영체제 등을 통해 세마포어에 이미 익숙하신 분들은
+    // 무슨 뜻인지 이미 이해 하셨겠죠? 하지만 모르는 사람도 있을 수 있을테니 구체적인 예시를 들어보도록 하죠.
+    // 세마포어 S와 우리가 실행하고하 자는 동작(operation) A, B가 있습니다. 우리가 동작 A에서 세마포어 S에게 시그널을 보낸다는건
+    // 동작 B는 세마포어 S를 기다려야 한다는 것을 의미합니다. 동작 A가 끝나면, 세마포어 S는 시그널을 받고 B는 세마포어 S가 시그널을
+    // 받을 때까지 시작할 수 없습니다. B가 시작되면, S는 자동적으로 시그널되지 않은 상태로 들어갑니다. 다시 사용되기를 기다리면서요.
+    // 그래요. 맞습니다. A가 세마포어한테 "얼음!"하면 S는 A가 다시 "땡!"해주기 전까지 얼어있어야 해요. B는 S가 "땡!"될 때까지 기다려야 하구요.
+    // 
+    // 2. fence
+    // fence는 동기화를 한다는 관점에서 본다면 목적을 가지고 있습니다. 그러나, 이건 CPU(host)에서의 실행 순서의 정렬을 위한 겁니다. 
+    // 다시말해, CPU(host)가 GPU가 작업이 언제 끝났는지를 알고 싶으면 우리는 fence를 써야 합니다.
+    // 세마포어와 유사하게, 펜스 또한 signaled/unsignaled상태를 지닙니다. 우리가 실행할 작업을 보낼 때마다, 우리는 작업에 fence를
+    // 붙일 수 있습니다. 작업이 끝나면, 펜스에 시그널이 보내집니다. 그러면 우리는 host가 펜스가 시그널을 받을 때까지 기다리도록
+    // 할 수 있습니다. 그러면 호스트가 보내진 작업이 끝났는지를 보장할 수 있게 되지요.
+    // 
+    // 구체적인 예시는 스크린샷 작업이 될 수 있습니다. GPU에서 필요한 작업이 다 끝났다고 생각해보죠. 이제 GPU에서 얻은 이미지를
+    // CPU(host)로 전송하고 파일을 메모리에 저장해야 합니다. 우리는 전송작업을 수행하는 커맨드 버퍼 A가 있고 펜스F가 있습니다.
+    // 우리는 커맨드 버퍼A에 펜스F를 첨부해 전송합니다. 그리고 즉시 host(CPU)에게 F를 기다리라고 말합니다. 이렇게 되면
+    // host는 커맨드 버퍼A가 끝날 때까지 기다려야 하지요. 그러면 우리는 호스트가 파일을 디스크에 안전하게 저장하도록 할 수 있습니다!
+    // 
+    // 세마포어와 다르게, vkWaitForFence(F) 는 host가 실행되는 것을 막지 않습니다. 그 말인 즉슨, 호스트는 A의 실행이 끝날 때까지
+    // 아무것도 하지 않는다는 겁니다! 그래서 보통 세마포어를 선호하고 아직 언급하지 않은 다른 동기화 기법을 선호합니다.
+    // 그리고, 펜스는 무조건 직접 리셋돼야 합니다! 왜냐면 펜스는 호스트가 작업하는걸 통제하고 때문에 호스트는 언제 펜스를
+    // 재설정할지 결정하기 때문입니다. 호스트의 개입없이 GPU간의 작업순서를 결정하는 세마포어와는 대조되는거죠.
+    // 
+    // 짧게 말해, 세마포어는 GPU에서의 작업 순서를 결정하고 펜스는 GPU, CPU간의 작업 순서를 결정합니다.
+    // 
+    // 3. 뭘 써야하나요?
+    // 우리는 두 개의 동기화 요소에 대해 배웠고 이 두 가지 요소는 두 가지 동기화 작업을 편리하게 수행 가능케 해줍니다!(헉, 엄청난 우연이네요)
+    // 바로 스왑체인 동작과 이전 프레임의 작업이 끝나기를 기다리는 것입니다.
+    // 우리는 스왑체인 작업에선 세마포어를 쓸겁니다! 왜냐면 스왑체인 작업은 GPU에서 일어나고 그래서 우리는 가능한
+    // host가 작업을 기다리게 두지는 않고 싶으니까요.
+    // 이전 프레임의 작업이 끝나기를 기다리는 것은, 우리는 펜스를 사용할 겁니다! 왜냐면 우리는 호스트가 기다리기를 원하니까요
+    // 이게 우리가 한 번에 하나 이상의 프레임을 그리지 않는 이유죠.
+    // 우리는 매 프레임마다 해야 할 작업들을 재정렬 해야 하기 때문에 우리는 이번 프레임이 끝날 때까지 다음 프레임의 작업을
+    // 커맨드 버퍼에 기록할 수 없습니다. 왜냐면 우리는 GPU가 사용하고 있는 현재의 커맨드 버퍼에 내용들을 덮어쓰고 싶진 않으니까요.
+    //
+
+
     void mainLoop() {
 
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
+            drawFrame();
         }
 
     }
+
+    void drawFrame() {
+        
+    }
+
+    // commandBuffer파라미터를 해당 함수에 패스해서 쓰기를 시작할거임
+    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+
+
+        VkCommandBufferBeginInfo beginInfo{}; // 커맨드 버퍼에 쓰기 위해선 해당 struct를 만들어 줘야함
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = 0;
+        // VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: 커맨드 버퍼의 각각의 recording은 한 번만 보내집니다. 
+        // 그리고 나서 커맨드 버퍼는 각 submission간에 다시 리셋되고 기록됩니다.
+        // VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT: 만약 해당 버퍼가 secondary command buffer라면
+        // 커맨드 버퍼는 완전히 렌더 패스 안에 있는 것으로 인식됩니다. primary라면 무시됩니다.
+        // VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT: 커맨드 버퍼는 pending state에 있을 때 큐에 재전송될
+        // 수 있습니다. 그리고 여러개의 프라이머리 커맨드 버퍼에 기록될 수 있습니다.
+        beginInfo.pInheritanceInfo = nullptr;
+        // secondary command 버퍼만 사용할 수 있는 optional한 파라미터이며 primary command buffer에서 어떤 상태를 
+        // 상속받을지를 결정합니다.
+
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("failed to begin recording command buffer!");
+        }
+
+        // vkCmdBeginRenderPass로 렌더패스를 시작하면 그리기를 시작한다.
+        // 렌더패스는 VkRenderPassBeginInfo구조체로 시작할 수 있다.
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = renderPass; // 어떤 렌더 패스를 이용할지 결정
+        renderPassInfo.framebuffer = swapChainFrameBuffers[imageIndex];
+        // 위에서 생성했던 (이미지에 이미지 뷰를 통해 바인딩된)프레임버퍼들 렌더패스에 직접 바인딩함으로써 렌더패스 시작 => 즉, 렌더 타겟 설정!
+        renderPassInfo.renderArea.offset = { 0, 0 };
+        renderPassInfo.renderArea.extent = swapChainExtent;
+        // 셰이더가 로드되고 저장되는 위치를 정의함. 이 영역 밖의 region은 정의되지 않지만 attachment size랑 동일하게 설정하는게 best
+
+        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
+        //VK_ATTACHMENT_LOAD_OP_CLEAR에서 정의했던 clear operation을 위해 쓰일 것이다. => (0,0,0,1)이면 black으로 클리어 =>뒷배경이 black
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearColor;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        // 이러면 이제 렌더패스가 시작된다. command를 record하는 함수들은 전부 vkCmd prefix가 붙는다.
+        // 그리고 전부 void를 리턴한다. => 실제 recording이 끝날 때까진 에러가 생기지 않기때문에
+        // VK_SUBPASS_CONTENTS_INLINE: 렌더패스 커맨드가 primary command buffer에 임베드 되고 secondary command buffer는 쓰지 않음
+        // VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS: 렌더 패스 command가 secondary command buffer에서 실행됨
+
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        // 두 번째 파라미터를 통해 파이프라인이 그래픽스용인지 compute shade용인지 기술해줌
+
+
+        // 파이프라인에서 viewport랑 scissor설정을 dynamic으로 해줬기 때문에 drawcall을 내기 전에
+        // 커맨드버퍼의 뷰포트 사이즈를 정의해줘야 함
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(swapChainExtent.width);
+        viewport.height = static_cast<float>(swapChainExtent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        // vertexCount: vertex의 개수가 몇 개인지
+        // instanceCount: instanced rendering을 위해 사용. 지금은 안쓰니까 1
+        // firstVertex: vulkan은 opencl과 같이 spir-v를 쓰기 때문에 in변수의 이름을 지정해서
+        //              데이터가 전송되는 것이 아닌 gl_vertexIndex를 이용해 직접 접근함
+        // firstInstance: instanced rendering을 위해 쓰임. gl_InstanceIndex가 최소값임
+
+
+        vkCmdEndRenderPass(commandBuffer);
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to record command buffer!");
+        }
+    }
+
+
+
+
+#pragma endregion
 
     void cleanup() {
 
