@@ -15,9 +15,6 @@
 #include <fstream>
 
 
-// https://stackoverflow.com/questions/39557141/what-is-the-difference-between-framebuffer-and-image-in-vulkan
-// 공부 자료
-
 VkResult CreateDeubgUtilMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
     auto func =
@@ -94,6 +91,7 @@ private:
     // 파이프라인을 통해 uniform변수의 값을 바꿔주는 등의 셰이더, vertex 데이터 접근 가능
     VkRenderPass renderPass;
     VkPipelineLayout pipelineLayout;
+    // VkPipelineLayout은 셰이더 스테이지와 셰이더 리소스 사이의 인터페이스를 기술하는데 사용됨 (ex. 텍스쳐, 정점, 유니폼변수 등등)
 
     std::vector<VkFramebuffer> swapChainFrameBuffers;
     
@@ -118,6 +116,11 @@ private:
     VkQueue presentQueue;
 
     VkPipeline graphicsPipeline;
+
+
+    VkSemaphore imageAvailableSemaphore; // swapchain으로부터 이미지를 얻어왔다는 것에 대한 signal을 보내는 세마포어
+    VkSemaphore renderFinishedSemaphore; // 렌더링이 끝났고 present가 가능하다는 것에 대한 signal을 보내는 세마포어
+    VkFence inFlightFence; // 한 번에 하나의 프레임만 렌더링 되도록 하는 세마포어
 
 
 
@@ -226,6 +229,7 @@ private:
         createFrameBuffers();
         createCommandPool();
         createCommandBuffer();
+        createSyncObjects();
 
         // VkDeviceMemory: 그냥 V-RAM에 메모리를 할당하는 것
         // VkImage: 해당 메모리를 어떻게 swapchain의 이미지로 사용하는지에 대한
@@ -233,6 +237,33 @@ private:
         // VkImageView: VkImage의 어느 부분을 사용할지 기술함. incompatiable한 interface의 포맷을 맞춰주는 역할도 할 수 있음
         // Framebuffer: VkImageView와 렌더패스로부터 출력된 attachment를 bind해주는 역할을 수행함.
         // VkRenderPass: 어느 attachment가 그려질지를 결정함.
+        // https://stackoverflow.com/questions/39557141/what-is-the-difference-between-framebuffer-and-image-in-vulkan
+
+
+    }
+
+    void createSyncObjects() {
+        // 현재 우리는 3가지 기능이 필요합니다.
+        // swapchain으로부터 이미지를 얻어왔다는 것에 대한 signal을 보내는 세마포어
+        // 렌더링이 끝났고 present가 가능하다는 것에 대한 signal을 보내는 세마포어
+        // 한 번에 하나의 프레임만 렌더링 되도록 하는 세마포어
+        // 클래스 멤버로 선언해 줍시다.
+
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
+            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
+            vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create semaphores!");
+        }
+        // 위 코드들은 항상 나오던 방식대로 작동하니 설명하지 않겠습니다.
+
+
 
     }
 
@@ -354,10 +385,10 @@ private:
         // 그리고 이러한 모든 과정들은 render pass object에 warpping 돼있다.
 
         // single color buffer attachment를 만들 것이다.
+
+
         VkAttachmentDescription colorAttachment{}; // => fragment shader의 "layout(location = 0) out vec4 outColor" 에 대응됨
         colorAttachment.format = swapChainImageFormat;
-
-        
         // color attachment의 format은 swap chain image의 format과 동일해야 함
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
         // multisampling을 지금은 안쓰고 있기 때문에 샘플링은 1번
@@ -426,12 +457,52 @@ private:
             //pPreserveAttachments : subpass에서 사용되진 않지만 보존돼야 하는 데이터들
 
 
+        // drawFrame() 함수로부터 넘어와 여기에 작성을 시작합니다.
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        // 처음 두 파라미터는 dependency와 dependent subpass의 index입니다.
+        // VK_SUBPASS_EXTERNAL는 특별한 값으로 srcSubpass, dstSubpass인지에 따라서
+        // 렌더패스 직전/직후의 "암시적인" 서브패스를 의미합니다.
+        // 아까전에 subpass가 하나밖에 없어보여도 subpass 직전/직후의 이러한 transition들 또한
+        // "암시적으로" subpass로 간주된다고 했었죠? 렌더 패스 자체로 들어오고 나가는 transition들이 바로 이겁니다.
+        // dstSubpass = 0 이 의미하는 것은 우리가 가지고 있는 하나뿐인 subpass를 의미합니다.
+        // subpass를 배열로 만들 수 있다는거 기억하죠? 우리는 subpass를 하나만 만들었고 거기서 0번째 subpass를 레퍼런스 하겠다는 뜻이죠
+        // dstSubpass는 항상 srcSubpass보다 커야합니다. (subpass중 하나가 VK_SUBPASS_EXTERNAL로 설정된게 아니라면요)
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        // srcStageMask는 모든 vulkan stage들에 대한 bitmask입니다.
+        // srcStageMask 필드는 어떤 stage들의 동작이 완료되기를 기다려야 하는지를 기술합니다.
+        // dstSubpass로 넘어가기 전에, 해당 bitmask의 동작들을 srcSubmask 내에서 완료하길 바라며 대기하도록 합니다.
+        // 우리는 swapChain이 우리가 이미지에 접근하기 전에 이미지를 읽어오는 완료하길 원하기에 위와 같이 설정합니다.
+        // 즉, srcSubpass가 color attachment 단계를 완료할 때까지 대기한다는 뜻입니다.
+        
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        // dstStageMask는 모든 vulkan stage들에 대한 bitmask입니다.
+        // 해당 bitmask에 설정된 stage는 srcStageMask에서 설정한 stage들이 모두 끝나기 전에는 실행되지 않습니다.
+        // 
+        // 다시말해, srcSubpass에서 srcStageMask에 해당된 동작들이 완료되기 전에는
+        // dstStageMask에 지정한 동작들이 dstSubpass에서 실행되지 않습니다.
+        // 쉽게말해, srcStageMask의 동작이 끝나야 dstStageMask의 동작은 실행 될 수 있지만
+        // dstStageMask에 지정되지 않았으면 srcSubpass든 dstSubpass든 병렬적으로 실행된다는 소리죠
+        // 
+        // 위의 예제에선, 실제로 필요한 순간까지 transition이 일어나지 않게 막습니다.
+
+        // https://www.reddit.com/r/vulkan/comments/s80reu/subpass_dependencies_what_are_those_and_why_do_i/
+        // 보충설명 자료
+
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = 1; 
         renderPassInfo.pAttachments = &colorAttachment; 
         renderPassInfo.subpassCount = 1;
         renderPassInfo.pSubpasses = &subpass;
+
+        // dependency를 설정해 줍시다.
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+        
 
         if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
             throw std::runtime_error("failed to create render pass!");
@@ -951,7 +1022,7 @@ private:
         }
 
         vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
-
+        vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
 
     }
 
@@ -1248,6 +1319,8 @@ private:
 
 #pragma region render loop
 
+    // semaphore와 fence에 대한 설명 
+
     // high level단에서 vulkan은 common set of step으로 작동합니다.
     // 1. 이전 프레임이 끝나기를 기다린다.
     // 2. swap chain으로부터 이미지를 얻어온다.
@@ -1286,20 +1359,20 @@ private:
     // 그래요. 맞습니다. A가 세마포어한테 "얼음!"하면 S는 A가 다시 "땡!"해주기 전까지 얼어있어야 해요. B는 S가 "땡!"될 때까지 기다려야 하구요.
     // 
     // 2. fence
-    // fence는 동기화를 한다는 관점에서 본다면 목적을 가지고 있습니다. 그러나, 이건 CPU(host)에서의 실행 순서의 정렬을 위한 겁니다. 
-    // 다시말해, CPU(host)가 GPU가 작업이 언제 끝났는지를 알고 싶으면 우리는 fence를 써야 합니다.
+    // fence는 동기화를 한다는 관점에서 본다면 같은 목적을 가지고 있습니다. 그러나, 이건 CPU(host)에서의 실행 순서의 정렬을 위한 겁니다. 
+    // 다시말해, CPU(host)가 GPU의 작업이 언제 끝났는지를 알고 싶으면 우리는 fence를 써야 합니다.
     // 세마포어와 유사하게, 펜스 또한 signaled/unsignaled상태를 지닙니다. 우리가 실행할 작업을 보낼 때마다, 우리는 작업에 fence를
     // 붙일 수 있습니다. 작업이 끝나면, 펜스에 시그널이 보내집니다. 그러면 우리는 host가 펜스가 시그널을 받을 때까지 기다리도록
     // 할 수 있습니다. 그러면 호스트가 보내진 작업이 끝났는지를 보장할 수 있게 되지요.
     // 
     // 구체적인 예시는 스크린샷 작업이 될 수 있습니다. GPU에서 필요한 작업이 다 끝났다고 생각해보죠. 이제 GPU에서 얻은 이미지를
-    // CPU(host)로 전송하고 파일을 메모리에 저장해야 합니다. 우리는 전송작업을 수행하는 커맨드 버퍼 A가 있고 펜스F가 있습니다.
+    // CPU(host)로 전송하고 파일을 메모리에 저장해야 합니다. 우리는 전송작업을 수행하는 커맨드 버퍼 A와 펜스F를 가지고 있습니다.
     // 우리는 커맨드 버퍼A에 펜스F를 첨부해 전송합니다. 그리고 즉시 host(CPU)에게 F를 기다리라고 말합니다. 이렇게 되면
     // host는 커맨드 버퍼A가 끝날 때까지 기다려야 하지요. 그러면 우리는 호스트가 파일을 디스크에 안전하게 저장하도록 할 수 있습니다!
     // 
     // 세마포어와 다르게, vkWaitForFence(F) 는 host가 실행되는 것을 막지 않습니다. 그 말인 즉슨, 호스트는 A의 실행이 끝날 때까지
     // 아무것도 하지 않는다는 겁니다! 그래서 보통 세마포어를 선호하고 아직 언급하지 않은 다른 동기화 기법을 선호합니다.
-    // 그리고, 펜스는 무조건 직접 리셋돼야 합니다! 왜냐면 펜스는 호스트가 작업하는걸 통제하고 때문에 호스트는 언제 펜스를
+    // 그리고, 펜스는 무조건 직접 리셋돼야 합니다! 왜냐면 펜스는 호스트가 작업하는걸 통제하고, 때문에 호스트는 언제 펜스를
     // 재설정할지 결정하기 때문입니다. 호스트의 개입없이 GPU간의 작업순서를 결정하는 세마포어와는 대조되는거죠.
     // 
     // 짧게 말해, 세마포어는 GPU에서의 작업 순서를 결정하고 펜스는 GPU, CPU간의 작업 순서를 결정합니다.
@@ -1307,9 +1380,9 @@ private:
     // 3. 뭘 써야하나요?
     // 우리는 두 개의 동기화 요소에 대해 배웠고 이 두 가지 요소는 두 가지 동기화 작업을 편리하게 수행 가능케 해줍니다!(헉, 엄청난 우연이네요)
     // 바로 스왑체인 동작과 이전 프레임의 작업이 끝나기를 기다리는 것입니다.
-    // 우리는 스왑체인 작업에선 세마포어를 쓸겁니다! 왜냐면 스왑체인 작업은 GPU에서 일어나고 그래서 우리는 가능한
+    // 스왑체인 작업에선 세마포어를 쓸겁니다! 왜냐면 스왑체인 작업은 GPU에서 일어나고 그래서 우리는 가능한
     // host가 작업을 기다리게 두지는 않고 싶으니까요.
-    // 이전 프레임의 작업이 끝나기를 기다리는 것은, 우리는 펜스를 사용할 겁니다! 왜냐면 우리는 호스트가 기다리기를 원하니까요
+    // 이전 프레임의 작업이 끝나기를 기다리기 위해선 펜스를 사용할 겁니다! 왜냐면 우리는 호스트가 기다리기를 원하니까요
     // 이게 우리가 한 번에 하나 이상의 프레임을 그리지 않는 이유죠.
     // 우리는 매 프레임마다 해야 할 작업들을 재정렬 해야 하기 때문에 우리는 이번 프레임이 끝날 때까지 다음 프레임의 작업을
     // 커맨드 버퍼에 기록할 수 없습니다. 왜냐면 우리는 GPU가 사용하고 있는 현재의 커맨드 버퍼에 내용들을 덮어쓰고 싶진 않으니까요.
@@ -1322,11 +1395,180 @@ private:
             glfwPollEvents();
             drawFrame();
         }
+        
+        vkDeviceWaitIdle(device);
+        // 이러한 부류의 함수들은 아주 기초적으로 동기화를 실행하기 위해 실행되는 함수들이죠.
+        // 이제 프로그램이 윈도우를 아무 문제없이 닫아내는 것을 볼 수 있습니다!
 
+
+        // 900줄이 넘는 코드를 입력하고 나서야, 우리는 겨우겨우 스크린에 무언가를 띄워냈네요!
+        // vulkan program을 부트스트래핑(더 복잡하고 빠른 환경을 구성)하는 작업은 분명히 더 많은 작업이 필요하지만
+        // vulkan은 이러한 명시성을 통해 상당한 양의 control을 줄 것입니다. 
+        // 코드를 한 번 다시 읽어보고 모든 vulkan object에 대한 개념을 다시 빌드해보세요 
+        // 우리는 지금 시점부터 기능성을 확장하기 위해 지금까지 배운 모든 지식들을 빌드할거거든요
+        // 다음 챕터에선, 비행(작동)중인 여러 프레임을 처리하기 위해 루프를 확장할겁니다.
+        //
     }
 
     void drawFrame() {
+
+        // 드디어 drawFrame의 시작입니다! 지금까지는 전부 그리기를 위한 사전 작업이었고 드디어 그리기를 시작합니다.
+        // 지금까지만 해도 정말 힘겨운 여정이었는데 이제 겨우 시작이라니... 하지만 걱정마세요. 
+        // 원래 모든 일이든 시작이 반이라고 하잖아요. 실제로 Vulkan의 경우에도 하드웨어 가속을 위한 최적화를 위해
+        // 가능한 하드웨어의 기능들을 모두 외부로 노출했기에 사전작업이 복잡했을 뿐이지 실제 렌더링 작업으로 가면
+        // 생각보다 별 일 없습니다. 아마도...요?
         
+        vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+        // 우선, 우리는 두 개의 프레임이 동시에 렌더링 되길 원하지 않기에 그리기를 시작하기 전에 
+        // 펜스를 이용해 이전 프레임이 끝날 때까지 기다려 주도록 하겠습니다.
+        // 만약 그리려고 할 때 이전 프레임의 렌더링이 이미 끝났으면 기다리지 않고 바로 넘어가겠죠.
+        // vkWaintForFences는 하나의 펜스만을 기다리는 것이 아닌 여러개의 펜스를 기다리기 위해 만들어진 함수인데
+        // fence의 array를 받을 수 있습니다. 두 번째 파라미터는 array의 size 세 번째 파라미터는 array의 주소입니다.
+        // 네 번째의 VK_TRUE는 우리가 array의 모든 펜스를 기다리겠다는 뜻입니다. 지금의 경우에는 어차피 fence가 한개니
+        // 큰 의미는 없겠네요.
+        // 해당 함수는 또한, fence를 기다리는 최대치인 timeout을 정할 수 있는데 이를 UINT64_MAX로 지정하면 timeout을 없앨 수 있죠
+        
+        vkResetFences(device, 1, &inFlightFence);
+        // fence를 기다리는 것이 끝났다면 이전 프레임의 렌더링이 완료됐다는 뜻이므로, 이젠 이번 프레임을 그리기 시작해야 함으로
+        // 이번 프레임을 위한 펜스를 새롭게 지정해줍시다. 근데, 작업을 계속하기 전에, 우리 코드에 좀 기겁할만한 점이 있습니다.
+        // 우리가 처음 drawFrame() 을 호출할 때, 곧바로 inFlightFence가 signaled되기를 기다립니다.
+        // inFlightFence는 렌더링이 끝난 이후에 signaled되기 때문에 제일 처음이 화면에 뜨기 시작하는 그 시점에는 signal을 해줄
+        // 이전 프레임이 없습니다! vkFWaitForFences함수는 절대 일어나지 않을 일을 기다리며 바보같이 멀뚱멀뚱 서있겠죠
+        // 
+        // 이러한 딜레마의 해결방법은 빌트인 API에 있습니다. fence를 처음 만들 때 signaled state로 시작하도록 만들어주면 됩니다.
+        // 이를 위해, createSyncObjects()함수로 돌아가 K_FENCE_CREATE_SIGNALED_BIT를 지정해 주도록 합시다.
+        //
+
+
+
+        // 펜스 설정을 모두 마친 이후 drawFrame 내에서 해야 할 다음 일은, 스왑체인으로부터 이미지를 얻어오는 것입니다.
+        // swapChain은 현재 glfw로부터 얻어온 extension이기에 vk*KHR함수를 이용하도록 합니다. 
+        uint32_t imageIndex;
+        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        // 첫번째랑 두번째 파라미터는 뭔지 다들 아실테고, 세 번째 파라미터는 나노세컨드 단위로 이미지가 available해지는
+        // 것을 기다리는 timeout입니다. MAX로 설정해서 일단은 비활성화 해둡시다.
+        // 다음 두 파라미터는 present engine이 이미지를 사용하는 것을 끝냈을 때 어떤 semaphore에게 신호를 줄 지 입니다.
+        // 세마포어도 가능하고 펜스도 가능합니다. 지금은 세마포어를 이용할 것이므로 imageAvailableSemaphore를 네번째 파라미터로 전달해줍니다.
+        // 마지막 파라미터는 사용가능해진 이미지의 인덱스를 얻어옵니다. 해당 인덱스는 통해 우리가 클래스 멤버로 만들어둔
+        // swapChainImages 배열의 인덱스에 해당합니다. 우리는 VkFrameBuffer를 골라주기 위해 해당 인덱스를 활용하겠습니다.
+
+        // imageIndex를 얻어온 이후, command buffer에 해야 할 일들을 기록하겠습니다.
+        // 우선, vkResetCommandBuffer 함수를 불러 기록이 가능하게 해줍니다.
+        vkResetCommandBuffer(commandBuffer, 0);
+        // 두 번째 파라미터는 VkCommandBufferResetFlagBits 라는 flag인데 지금은 딱히 특별한 설정을 해주지 않을거라 0으로 남깁니다.
+        // 이제, recordCommandBuffer를 이용해 우리가 원하는 command를 기록해줍시다.
+        recordCommandBuffer(commandBuffer, imageIndex); // commandBuffer는 핸들값이기에 그냥 넘겨줘도 됨
+        // 기록을 완료하면, 이제 커맨드 버퍼를 GPU에 전송 할 수 있습니다.
+        // (해당 함수는 우리가 전에 직접 정의해준 함수입니다)
+
+        // Queue submission과 synchronization은 VkSubmitInfo 구조체에 파라미터를 정의합니다.
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
+        VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+
+
+        submitInfo.waitSemaphoreCount = 1;
+        submitInfo.pWaitSemaphores = waitSemaphores;
+        submitInfo.pWaitDstStageMask = waitStages;
+        // 위 세개의 파라미터는 실행이 시작하기 전에 어느 세마포어의 어느 스테이지에 파이프라인이 대기할지를 기술합니다.
+        // image에 color를 쓰는 작업이 가능할 때까지 기다리고 싶기 때문에
+        // VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT라고 지정해 color attachment에 쓰기를 수행하는 단계를 기다리도록 지정합니다.
+        // color attachment에 쓰는 그래픽스 파이프라인의 스테이지를 기다립니다. 
+        // 이 말을 이론적으로 본다면, "이미지가 아직 available하지 않아도 vertex shader는 이미시작할 수도 있다는 뜻입니다."(중요)
+        // waitStages[] 의 각각의 요소들은 pWaitSemaphore와 대응되죠.
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        // 다음 두 버퍼는, execution을 위해 어느 버퍼가 전송될지를 결정합니다. 우리는 우선 단순히 single command buffer
+        // 만 사용하니 이것만 보내도록 하겠습니다.
+
+
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = signalSemaphores;
+        // signalSemaphoreCount랑 pSignalSemaphores파라미터는 커맨드 버퍼의 동작이 끝나면
+        // 어느 세마포어에 시그널을 보낼지 정의합니다.
+        // 우리의 경우에, renderFinishSemaphore를 사용합니다.
+
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
+            throw std::runtime_error("failed to submit draw command buffer!");
+        }
+        // 이제 command buffer를 graphics queue로 보내줍니다.
+        // 해당 함수는 submitInfo를 array로 받아올 수 있기 때문에 workload가 훨씬 클 때 효율적입니다.
+        // 똑같은 VkSubmitInfo로 여러 commandBuffer를 보내줄 수도 있지만 다른 vkSubmitInfo로 여로 commandBuffer를 보내줄 수도 있는거죠
+        // 마지막 inFlightFence는 커맨드 버퍼의 execution이 끝났을 때, 어느 fence에게 signal을 줄 지에 대해 정해줍니다.
+        // 이를 통해서, 다음프레임에 CPU는 커맨드를 기록하기 전에 커맨드버퍼의 실행이 끝내길 기다릴겁니다!
+        
+
+
+        // createRenderPass()함수의 colorAttachment를 정의할 때, 렌더패스의 subpass가 자동으로 image layout transition을 
+        // 하도록 지정했다는 것이 기억 나시나요?(안나면 보고오면 되죠)
+        // 이러한 transition들은 subpass간의 메모리/실행 종속성을 기술하는 subpass dependency에 의해 컨트롤됩니다.
+        // 근데 지금은 subpass가 하나밖에 없어서 의미가 없어보이지만, subpass 직전/직후의 이러한 transition들 또한 "암시적으로" subpass로 간주된답니다.
+        // 
+        // 렌더패스의 시작과 끝에서 transition을 책임지는 두 개의 built-in dependencies(subpass)가 있습니다.
+        // 하지만, 렌더패스의 시작에 있는 놈은 우리가 원하는 시기에 시작된다고 보장 할 수 없습니다.
+        // 아까 말했죠? "이미지가 아직 available하지 않아도 vertex shader는 이미시작할 수도 있다" 라구요
+        // 때문에, 파이프라인의 시작에 transition이 일어날 것이라고 가정하고 설정을 해놨지만 
+        // transition을 시작했을 때 아직 이미지를 얻지 못했을 수도 있습니다!
+        // 이를 해결하기 위해 우리가 waitSemaphores와 waitStages를 설정한 것이죠 
+        // waitStages를 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT 로 정해주면
+        // 이미지가 사용 가능해질때까지 렌더패스가 시작하지 않도록 정의해줄 수 있습니다!
+        // 또는, 기존 설정해 뒀던 대로 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT 스테이지까지 기다리도록 만들어도 됩니다.
+        // 
+        // 서브패스의 종속성과 그들이 어떻게 일하는 지에 대한 이해를 위해서 일단은 기존 설정대로 놔둡시다.
+        
+        // 그리고 또 문제가 있습니다. 사실 서브패스는 실행 순서가 없거든요?
+        // 서브패스는 default로 특정 순서를 지켜서 실행되지 않고 동기적으로 실행됩니다.
+        // 그것이 우리가 subpass dependencies를 지정해 줘야 하는 이유입니다.
+        // 우리가 여기서 semaphore로 했던 작업을 subpass dependencies로 해준다고 생각하면 되겠군요.
+        
+        // subpass의 종속성을 기술하는 것은 VkSubpassDependency 구조체에 정의됩니다.
+        // createRenderPass()함수로 가서 dependency라는 이름의 구조체를 정의해보죠.
+
+        // 자, 이제는 마지막 step으로 swapchain에 결과를 돌려주는 작업만 남았습니다.
+        // presentation은 VkPresentInfoKHR구조체에 정의됩니다.
+        VkPresentInfoKHR presentInfo{};
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+        presentInfo.waitSemaphoreCount = 1;
+        presentInfo.pWaitSemaphores = signalSemaphores;
+        // 처음 두 파라미터는 위의 submitInfo에서 정의했던 것처럼 presentation이 일어나기 전에 
+        // 어느 semaphore를 기다려야 하는지를 정의합니다. 우리는 command buffer가 execution을 끝내고 나서 triangle이
+        // 그려지길 원하기 때문에 signalSemaphores를 사용하도록 하겠습니다.
+        
+        VkSwapchainKHR swapChains[] = { swapChain };
+        presentInfo.swapchainCount = 1;
+        presentInfo.pSwapchains = swapChains;
+        presentInfo.pImageIndices = &imageIndex;
+        // 다음 두 파라미터는 이미지들을 present하기 위한 스왑체인이 무엇인지와 각각의 스왑체인의
+        // 어느 이미지에 그릴지를 정의합니다. 대부분의 경우에는 하나의 스왑체인에만 그림을 그릴거에요
+        
+        presentInfo.pResults = nullptr; // Optional
+        // 마지막은 optaional한 파라미터인데 위에서 설정준 각각의 스왑체인에 대한 presentation결과값이
+        // 성공적이었는지 아닌지를 반환해주는 value의 array를 정의해줍니다.
+        // 근데 대부분의 경우에는 하나의 스왑체인을 쓰고 있기 때문에 필수적이진 않습니다.
+        // 왜냐면 presentation 함수 자체가 해당 값을 리턴해주거든요. 
+        
+        vkQueuePresentKHR(presentQueue, &presentInfo);
+        // 위의 함수를 통해 이미지를 스왑체인에 present하는 것을 요청합니다.
+        // 이에 대한 에러 핸들링은 vkAcquireNextImageKHR 와 vkQueuePresentKHR 에서 이뤄지는데 이는 다음 챕터에서 다뤄보죠
+        // 왜냐면 우리가 봤던 다른 함수들처럼 여기서 실패한다고 필수적으로 프로그램이 종료해야하진 않거든요.
+        // 만약 여기서 잘 마무리 했다면, 삼각형을 볼 수 있을거에요. 와!
+        //
+        // 근데, 만약 열렸던 창을 닫으면 프로그램이 크래시가 나서 validation error가 뜨는 것을 볼 수 있을거에요
+        // debugCallback 함수가 왜 그런지 말해줄텐데 한 번 살펴 보도록 하죠
+        // 
+        // 에러 메세지 봅시다. drawFrame의 모든 동작이 비동기적이라는것이 기억 나시나요? 그건 바로 루프를 빠져나갈 때
+        // drawFrame과 presentation이 비동기적이라는게 기억 나시나요? 그 말인 즉슨 mainLoop를 빠져나가면 presentation과 drawing동작은
+        // 아마도 계속 작동되고 있을거라는 뜻입니다. 그런데 그렇다고 동작중에 리소스를 전부 정리하면 비효율적이겠죠?
+        // 
+        // 우선은 logical device가 mainLoop를 나가기 전에 operation을 완수하기를 기다리고 윈도우를 없애는게 좋습니다.
+        // 이를 위해 mainLoop 함수로 돌아가보죠
+        //
+
+
     }
 
     // commandBuffer파라미터를 해당 함수에 패스해서 쓰기를 시작할거임
@@ -1375,6 +1617,7 @@ private:
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
         // 두 번째 파라미터를 통해 파이프라인이 그래픽스용인지 compute shade용인지 기술해줌
+        // 파이프라인에 커맨드 버퍼를 바인딩해줌
 
 
         // 파이프라인에서 viewport랑 scissor설정을 dynamic으로 해줬기 때문에 drawcall을 내기 전에
@@ -1415,6 +1658,10 @@ private:
 
     void cleanup() {
 
+        vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
+        vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
+        vkDestroyFence(device, inFlightFence, nullptr);
+
         vkDestroyCommandPool(device, commandPool, nullptr);
 
         for (auto framebuffer : swapChainFrameBuffers) {
@@ -1423,6 +1670,7 @@ private:
 
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyRenderPass(device, renderPass, nullptr);
 
         for (auto imageView : swapChainImageViews) {
             vkDestroyImageView(device, imageView, nullptr);
