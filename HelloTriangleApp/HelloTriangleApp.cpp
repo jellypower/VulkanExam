@@ -15,6 +15,17 @@
 #include <fstream>
 
 
+#include <glm/glm.hpp>
+/*
+    여기부터
+
+*/
+
+struct Vertex {
+    glm::vec2 pos;
+    glm::vec3 color;
+};
+
 VkResult CreateDeubgUtilMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
     auto func =
@@ -97,7 +108,21 @@ private:
     
     VkCommandPool commandPool;
 
-    VkCommandBuffer commandBuffer;
+    //VkCommandBuffer commandBuffer;
+    //VkSemaphore imageAvailableSemaphore; // swapchain으로부터 이미지를 얻어왔다는 것에 대한 signal을 보내는 세마포어
+    //VkSemaphore renderFinishedSemaphore; // 렌더링이 끝났고 present가 가능하다는 것에 대한 signal을 보내는 세마포어
+    //VkFence inFlightFence; // 한 번에 하나의 프레임만 렌더링 되도록 하는 세마포어
+
+    std::vector<VkCommandBuffer> commandBuffers;
+
+    std::vector<VkSemaphore> imageAvailableSemaphores; // swapchain으로부터 이미지를 얻어왔다는 것에 대한 signal을 보내는 세마포어
+    std::vector<VkSemaphore> renderFinishedSemaphores; // 렌더링이 끝났고 present가 가능하다는 것에 대한 signal을 보내는 세마포어
+ 
+    std::vector<VkFence> inFlightFences; // 한 번에 하나의 프레임만 렌더링 되도록 하는 세마포어
+
+    bool framebufferResized = false;
+
+
 
     const uint32_t WIDTH = 800;
     const uint32_t HEIGHT = 600;
@@ -118,11 +143,9 @@ private:
     VkPipeline graphicsPipeline;
 
 
-    VkSemaphore imageAvailableSemaphore; // swapchain으로부터 이미지를 얻어왔다는 것에 대한 signal을 보내는 세마포어
-    VkSemaphore renderFinishedSemaphore; // 렌더링이 끝났고 present가 가능하다는 것에 대한 signal을 보내는 세마포어
-    VkFence inFlightFence; // 한 번에 하나의 프레임만 렌더링 되도록 하는 세마포어
+    const int MAX_FRAMES_IN_FLIGHT = 2;
 
-
+    uint32_t currentFrame = 0;
 
 #ifdef NDEBUG
     const bool enableValidationlayers = false;
@@ -209,9 +232,53 @@ private:
         glfwInit();
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-
+        
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, frameBufferResizeCallback);
+
+    }
+
+    // Chapter: Drawing a triangle -> Drawing -> Frames in flight -> Handling resizes explicitly
+    // 많은 드라이버들과 플랫폼들이 윈도우를 resize한 이후VK_ERROR_OUT_OF_DATE_KHR을 자동적으로 trigger한다고 하더라도 
+    // 동작이 보장되는 것은 아닙니다. 그것이 우리가 추가적인 핸들 리사이즈 관련 콜백을 명시적으로 지정해줘야 하는 이유입니다.
+    // 일단 클래스의 private멤버변수로 resize가 일어났음을 알려주는 플래그 멤버 변수를 추가해줍니다.
+    // bool framebufferResized = false;
+    // 이후 drawFrame에서 두 번째 recreateSwapChain() 함수 호출 부분으로 가서 해당 flag를 체크하도록 로직을 수정해줍니다.
+    // 
+    // 굳이 첫 번째가 아닌 두 번째 vkQueuePresentKHR함수를 실행한 이후 flag를 체크하는 세마포어가 일관된
+    // 상태를 유지하기 위해 꽤나 중요합니다. 그게 아니라면 시그널된(사용 가능한) 세마포어의 상태를 제대로 얻어올 수 없을
+    // 수도 있거든요.
+    // 이제 실제로 resize를 감지해주기 위해 GLFW프레임워크의 glfwSetFramebufferSizeCallback 함수를 이용하여
+    // 콜백 함수를 등록해 줍시다.   
+    //
+
+    static void frameBufferResizeCallback(GLFWwindow* window, int width, int hegith) {
+        // 지금 static 함수로 콜백을 만든 이유는 GLFW는 어떻게 this포인터의 멤버함수를 호출할지에 대해 모르기 때문입니다.
+        // GLFW에는 현재 만들고 있는 HelloTriangleApp 클래스가 없잖아요? 게다가 glfw는 C언어 기반이라서
+        // C++ 기반의 멤버함수를 콜백함수로 넘겨주지도 못하구요
+        // 
+        // 그러나 콜백함수를 통해GLFWwindow를 callback함수의 파라미터로 얻어올 수 있다는 것을 보셨을 테고
+        // 이와 함께 유저가 가진 임의의 포인터를 콜백에게 전달해주는 glfwSetWindowUserPointer라는 
+        // GLFW내장 함수가 있으니 그걸 통해 유저 데이터를 해당 콜백에게 넘겨 줄 수 있습니다.
+        // initWindow 함수로 가서 glfwSetWindowUserPointer(window, this); 구문을 추가해주도록 합시다.
+        // 
+        // 이제 넘겨준 해당 값을 이용하기 위해서 콜백함수 내에서 glfwGetWindowUserPointer함수를 써서 해당 주소값을
+        // 얻어오고 이를 캐스팅하여 활용하면 됩니다.
+        //
+        
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+
+        // 이제 프로그램을 실행해보고 프레임 버퍼가 실제로 리사이즈동작을 제대로 하는지 확인해 봅시다.
+        // 맞다, resize를 하려면 glfwInit함수로 가서 GLFW_RESIZABLE힌트에 대한 기능을 꺼야하는 것을 잊지 마세요.
+
+
+        // swap chain이 out of date가 되는 특별한 경우가 또 있습니다. 바로 프레임버퍼 사이즈가 0이 되는 상황입니다.
+        // 맞아요, 윈도우 창을 최소화 하면 일어나는 일이죠. 아니면 윈도우 창을 최소 사이즈로 resize해버린다던가요.
+        // 이번 튜토리얼에선 그냥 위도우가 다시 foreground로 나올 때까지 프로그램을 일시정지 상태로 둘겁니다.
+        // recreateSwapChain 함수의 처음 부분으로 이동해보도록 하죠.
+
 
     }
 
@@ -228,7 +295,7 @@ private:
         createGraphicsPipeline();
         createFrameBuffers();
         createCommandPool();
-        createCommandBuffer();
+        createCommandBuffers();
         createSyncObjects();
 
         // VkDeviceMemory: 그냥 V-RAM에 메모리를 할당하는 것
@@ -249,6 +316,10 @@ private:
         // 한 번에 하나의 프레임만 렌더링 되도록 하는 세마포어
         // 클래스 멤버로 선언해 줍시다.
 
+        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
@@ -256,10 +327,13 @@ private:
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
-            vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create semaphores!");
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+
+            if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
+                vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
+                vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create semaphores!");
+            }
         }
         // 위 코드들은 항상 나오던 방식대로 작동하니 설명하지 않겠습니다.
 
@@ -267,7 +341,9 @@ private:
 
     }
 
-    void createCommandBuffer() {
+    void createCommandBuffers() {
+
+        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -276,11 +352,11 @@ private:
         // VK_COMMAND_BUFFER_LEVEL_PRIMARY: 해당 commandBuffer는 execution을 위해 다른 큐에 전송될 수 있음. 그러나 다른 command buffer들로부터
         // 호출되는 것은 불가능
         // VK_COMMAND_BUFFER_LEVEL_SECONDARY: 곧바로 execution을 위해 큐에 전송될 순 없음. 그러나, primary command buffer들로부터는 호출 될 수 있음
-        allocInfo.commandBufferCount = 1;
+        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
         // 지금같은 경우에는 secondary command buffer를 만들진 않을거지만, common operation을 재사용 하는데 secondary command buffer는 큰 도움이 될 수 있음
         // 지금같은 경우에는 커맨드 버퍼를 하나만 만들거임
 
-        if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+        if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
         }
 
@@ -440,7 +516,6 @@ private:
         // 해당 VkAttachmentReference를 사용하는 서브패스동안에 attachment에 포함할 레이아웃을 지정
         // 해당 서브패스가 시작하면 attachment의 layout을 이것으로 바꿈
 
-
         
 
         //sub-pass 정의
@@ -466,7 +541,7 @@ private:
         // 렌더패스 직전/직후의 "암시적인" 서브패스를 의미합니다.
         // 아까전에 subpass가 하나밖에 없어보여도 subpass 직전/직후의 이러한 transition들 또한
         // "암시적으로" subpass로 간주된다고 했었죠? 렌더 패스 자체로 들어오고 나가는 transition들이 바로 이겁니다.
-        // dstSubpass = 0 이 의미하는 것은 우리가 가지고 있는 하나뿐인 subpass를 의미합니다.
+        // dstSubpass = 0 이 의미하는 것은 우리가 방금 딱 하나 만들었던 하나뿐인 subpass를 의미합니다.
         // subpass를 배열로 만들 수 있다는거 기억하죠? 우리는 subpass를 하나만 만들었고 거기서 0번째 subpass를 레퍼런스 하겠다는 뜻이죠
         // dstSubpass는 항상 srcSubpass보다 커야합니다. (subpass중 하나가 VK_SUBPASS_EXTERNAL로 설정된게 아니라면요)
         dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -797,6 +872,94 @@ private:
         // 셰이더 모듈이 만들어지면 spir-v에서 빌드된 셰이더코드가 저장된 버퍼는 바로 해제돼도 된다.
 
         return shaderModule;
+    }
+
+    void cleanupSwapChain() {
+        for (size_t i = 0; i < swapChainFrameBuffers.size(); i++) {
+            vkDestroyFramebuffer(device, swapChainFrameBuffers[i], nullptr);
+        }
+
+        for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+            vkDestroyImageView(device, swapChainImageViews[i], nullptr);
+        }
+
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
+    }
+
+
+    // Chapter: Drawing a triangle -> Swap Chain recreation
+    // 지금까지 우리가 만든 어플리케이션은 triangle을 완벽하게 그릴 수 있습니다.
+    // 그러나, 적절히 다룰 수 없는 예외적인 상황이 몇 가지 있습니다.
+    // window surface가 swap chain자체를 바꿔버린 다던가하는 상황이 오면 더 이상 호환이 불가능합니다.
+    // 가령, 윈도우의 사이즈를 바꿔버린다던가 하는 상황같은 거죠.
+    // 이번에는 이러한 이벤트를 잡아내서 스왑체인을 다시 만드는 과정을 시연할 겁니다.
+    //
+    // recreateSwapChain()함수를 만들고 createSwapChain함수랑 스왑체인이나 윈도우 사이즈에 영향을 받는
+    // 함수들을 전부 여기서 호출해보죠
+    //
+    void recreateSwapChain() {
+
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+        // 처음의 glfwGetFramebufferSize함수는 윈도우 사이즈가 타당한 경우에 무조건 실행되고
+        // glfwWaitEvetns는 기다릴 것이 없는 경우를 처리합니다.
+        // 축하합니다! 우리는 이제서야 제대로 작동하는 vulkan프로그램을 만들어냈습니다!
+        // 다음챕터부터는 vertex셰이더 내에 하드코딩된 정점데이터를 없애고 실제로 vertex buffer를 사용해보도록 합시다!
+
+        vkDeviceWaitIdle(device);
+        // 우선 VkDeviceWaitIdle함수를 호출해줍시다. 저번 챕터의 마지막 부분에서 말했었죠? 우리는 사용하고 있는 리소스들에 대해서 직접 접근하면 안된다고.
+        // 그렇기에 현재 진행중인 작업들 즉, 리소스의 사용이 끝나기를 기다려야 합니다.
+
+        cleanupSwapChain();
+
+        createSwapChain();
+        createImageViews();
+        createFrameBuffers();
+        // 다음으론 우리는 스왑체인 자체를 다시 만들어줘야 합니다.
+        // 이미지뷰도 다시 만들어야 합니다. 왜냐면 이미지뷰는 스왑체인 이미지에 기반하니까요
+        // 마지막으로, 프레임버퍼는 직접적으로 스왑체인 이미지에 의존하기에 다시 만들어줘야 합니다.
+
+        // 그런데  이전 버전의 오브젝트들이 새로 만들어지기 전에 이전 버전의 리소스들을 전부 해제 해줘야 하기 때문에
+        // 우리는 cleanup 코드의 일부를 실제 객체를 생성하기 전에 호출해줘야 합니다. 위부분에 cleanupSwapChain 함수를
+        // 정의하고 호출해주도록 하죠
+
+        // 근데 여기서, 지금은 렌더패스를 다시 만들어주고있지는 않다는 것에 주목하도록 합시다.
+        // 이론적으로는 스왑체인 이미지 포맷 자체가 어플리케이션의 life time동안 변화하는 것이 가능하거든요?
+        // 가령 윈도우를 기본 모니터에서 HDR모니터로 옮긴다거나 하면요.
+        // 이건 어플리케이션이 dynamic range의 변화가 잘 반영되도록 렌더패스를 다시 만드는 것을 필요로 할 수도 있습니다.
+        //
+
+        // 이제 swapChain refresh의 부분으로써 다시 만들어져야 하는 모든 오브젝트들에 대한 cleanup 코드를
+        // cleanup 함수에서 cleanupSwapChain함수로 옮겨주도록 합시다.
+        //
+
+        // 여기서 chooseSwapExtent함수가 이미 (resize된)새로운 window resolution에 대해 쿼리를 진행한다는 것을 알아야 합니다.
+        // 저번에 구현했듯이 createSwapChain함수 자체가 chooseSwapExtent함수를 호출해 extent 사이즈를 알려주잖아요?
+        // 그래서 chooseSwpaExtent함수를 수정하거나 할 필요는 없습니다.
+        // 
+        // 이게 스왑체인을 다시 만들기 위한 일들의 전부입니다! 그러나, 이러한 접근 방법의 단점은 새로운
+        // 스왑 체인을 만들기 전에 우리가 모든 렌더링 과정을 멈춰야 한다는 거겠죠.
+        // 새로운 스왑체인을 얻어오기 전의 스왑체인 이미지로부터 드로잉 커맨드를 실행하면서
+        // 새로운 스왑체인을 만드는 것도 가능은 합니다. 
+        // 오래된 스왑체인을 VkSwapchainCreateInfoKHR구조체의 oldSwapChain필드에 복사해서 넣어주고
+        // 스왑체인의 사용이 끝나자마자 이걸 파괴해버리면 되죠
+        // 
+        // 
+        // 이제 우리는 언제 스왑체인을 재생성 하고 재생성 함수를 호출해야 하는지에 대해 알아보아야 합니다.
+        // 운이 좋게도, Vulkan은 보통 presentatio동안에 스왑체인이 더 이상 적절하지 않다고 알려줍니다.
+        // vkAcquireNextImageKHR 함수랑 vkQueuePresentKHR 함수는 다음과 같은 특별한 값을 리턴하곤 하죠.
+        // 
+        // VK_ERROR_OUT_OF_DATE_KHR: 스왑체인이 surface와 호환되지 않고 렌더링 과정에서 사용될 수 없습니다.
+        // 보통 윈도우를 resize하면 일어납니다.
+        // VK_SUBOPTIMAL_KHR: 스왑체인이 surface에 완벽하게 present 할 수 있습니다. 그러나 surface properties가 
+        // 더 이상 정확히 매치하진 않습니다.
+        // drawFrame함수의 vkAcquireNextImageKHR 함수 호출 부분으로 가볼까요?
+        //
+
     }
 
     void createImageViews() {
@@ -1236,6 +1399,7 @@ private:
     }
 
 
+    // swapChainImageFormat
     // 각각의 VkSurfaceFormatKHR 요소들은 format과 colorSpace 멤버를 포함한다.
     // format 은 컬러 채널과 타입을 특정한다. VK_FORMAT_B8G8R8A8_SRGB라면 8bit uint로 RGBA를 저장한다는 뜻이다. 
     // colorSpace는 국제 규격인 SRGB color space가 지원되는지를 VK_COLOR_SPACE_SRGB_NONLINEAR_KHR 플래그로 확인 할 수 있다.
@@ -1349,13 +1513,16 @@ private:
     // 사실은 타임라인에 대해선 이야기를 꺼낼 생각이 아직 없기에 그냥 앞으로 세마포어라 하면 그냥 바이너리 세마포어라고 생각해주시면
     // 편하겠습니다.
     // 
-    // 세마포어는 signaled이거나 unsignaled입니다. 이게 무슨 의미냐? 
+    // 세마포어는 signaled이거나 unsignaled입니다. 이게 무슨 의미냐? (signaled는 사용가능, unsignaled는 사용 불가능)
     // 모든 세마포어는 unsignaled로 시작합니다. 그리고 queue operation을 정렬하기 위해 세마포어를 사용하는 방법은 같은 세마포어를
     // signal으로 둠으로써 다른 queue operation을 기다리게 하는 것입니다. 운영체제 등을 통해 세마포어에 이미 익숙하신 분들은
     // 무슨 뜻인지 이미 이해 하셨겠죠? 하지만 모르는 사람도 있을 수 있을테니 구체적인 예시를 들어보도록 하죠.
-    // 세마포어 S와 우리가 실행하고하 자는 동작(operation) A, B가 있습니다. 우리가 동작 A에서 세마포어 S에게 시그널을 보낸다는건
-    // 동작 B는 세마포어 S를 기다려야 한다는 것을 의미합니다. 동작 A가 끝나면, 세마포어 S는 시그널을 받고 B는 세마포어 S가 시그널을
-    // 받을 때까지 시작할 수 없습니다. B가 시작되면, S는 자동적으로 시그널되지 않은 상태로 들어갑니다. 다시 사용되기를 기다리면서요.
+    // 세마포어 S와 우리가 실행하고하 자는 동작(operation) A, B가 있습니다.
+    // 우리가 Vulkan에게 알려줘야 하는 것은 A동작이 끝났을 때 세마포어 S에게 시그널을 보낸다는 것과 
+    // 동작 B는 실행을 시작하기 전에 세마포어 S에서 기다려야 한다는 것입니다.
+    // 
+    // 동작 A가 끝나면, 세마포어 S는 시그널을 받고 B는 세마포어 S가 시그널을 받을 때까지 시작이 불가능하다는 것입니다.
+    // B가 시작되면, S는 자동적으로 시그널되지 않은 상태로 들어갑니다. 다시 사용되기를 기다리면서요.
     // 그래요. 맞습니다. A가 세마포어한테 "얼음!"하면 S는 A가 다시 "땡!"해주기 전까지 얼어있어야 해요. B는 S가 "땡!"될 때까지 기다려야 하구요.
     // 
     // 2. fence
@@ -1370,7 +1537,7 @@ private:
     // 우리는 커맨드 버퍼A에 펜스F를 첨부해 전송합니다. 그리고 즉시 host(CPU)에게 F를 기다리라고 말합니다. 이렇게 되면
     // host는 커맨드 버퍼A가 끝날 때까지 기다려야 하지요. 그러면 우리는 호스트가 파일을 디스크에 안전하게 저장하도록 할 수 있습니다!
     // 
-    // 세마포어와 다르게, vkWaitForFence(F) 는 host가 실행되는 것을 막지 않습니다. 그 말인 즉슨, 호스트는 A의 실행이 끝날 때까지
+    // 세마포어와 다르게, 위의 예제의 vkWaitForFence(F) 는 host가 실행되는 것을 막습니다. 그 말인 즉슨, 호스트는 A의 실행이 끝날 때까지
     // 아무것도 하지 않는다는 겁니다! 그래서 보통 세마포어를 선호하고 아직 언급하지 않은 다른 동기화 기법을 선호합니다.
     // 그리고, 펜스는 무조건 직접 리셋돼야 합니다! 왜냐면 펜스는 호스트가 작업하는걸 통제하고, 때문에 호스트는 언제 펜스를
     // 재설정할지 결정하기 때문입니다. 호스트의 개입없이 GPU간의 작업순서를 결정하는 세마포어와는 대조되는거죠.
@@ -1408,6 +1575,67 @@ private:
         // 우리는 지금 시점부터 기능성을 확장하기 위해 지금까지 배운 모든 지식들을 빌드할거거든요
         // 다음 챕터에선, 비행(작동)중인 여러 프레임을 처리하기 위해 루프를 확장할겁니다.
         //
+
+
+        // Chapter: Drawing a triangle -> Drawing -> Frames in flight
+        // 이제 우리의 렌더 루프에는 눈에 띄는 결함이 하나 있습니다. 보통 렌더루프에서 CPU와 GPU의 exploitation을
+        // 최대화 하기 위해서 GPU에서 프레임을 렌더하는 작업과 CPU에서 드로우콜을 보내는 작업을 비동기적으로 작업하거든요?
+        // 그걸 위해서 우리는  CPU에서 드로우 콜을 보내는 "해당 프레임"이 완료되길 기다리는 것이 아닌
+        // 드로우 콜을 보냄과 동시에 "이전 프레임"의 GPU에서의 그리기 작업을 동시에 진행할 겁니다.
+        // 
+        // 이러한 문제점을 해결하기 위해서 여러 프레임을 한 번에 in-flight(비행하도록) 하는 겁니다.
+        // 다시 말해서, 하나의 프레임을 그리는 과정이 다음의 recording 과정을 방해하지 못하도록 하는 겁니다.
+        // 이걸 어떻게 할까요? 이를 위해선 한 프레임의 렌더링 과정에서 접근되고 수정되는 모든 리소스들은 반드시 복사돼야 합니다.
+        // 또한 여러개의 프레임 버퍼, 세마포어, 펜스가 필요하죠. 나중 챕터에서 다른 리소스들에 대한 여러 인스턴스들을
+        // 추가할 것이기 때문에 이 개념이 다시 나타날 겁니다.
+        // 
+        // 얼마나 많은 프레임들이 동시에 렌더링 될지에 대한 const 변수를 선언하면서 시작해보죠 
+        // private 멤버변수로 const int MAX_FRAMES_IN_FLIGHT = 2; 를 추가해줍시다.
+        // 
+        // 우리는 2라는 숫자를 선택했습니다. 왜냐면 CPU가 GPU보다 너무 앞서가길 원하진 않거든요.
+        // 한 번에 2프레임만 진행하게 두면서 CPU랑 GPU는 각각의 작업을 동시에 진행할 수 있게 됩니다.
+        // 또한, 만약 CPU가 생각해놨던 2프레임 보다 일찍 끝나면 해야 할 일을 GPU에 보내기 전에
+        // GPU의 작업이 끝나길 기다릴 거에요.
+        // 3개 이상의 frame들이 같이 진행되게 둔다면 CPU가 GPU를 너무 앞서서 프레임 지연이 생길 수도 있습니다.
+        // 일반적으로 추가적인 지연은 추천되는 사항은 아니구요
+        // 그치만 동시 진행 가능한 프레임 숫자를 직접 지정 가능케 하는 것도 Vulkan의 명시성에 대한 또 다른 예라고 볼 수 있겠네요
+        // 
+        // 각각의 프레임은 스스로의 커맨드 버퍼, 세마포어, 펜스를 가져야돼요. 함수와 변수의 형태를 바꾸도록 합시다.
+        // 
+        // 
+        // 우리는 여러 커맨드 버퍼를 만드는 것을 명시적으로 보여주기 위해위의 createCommandBuffer 멤버 함수를 
+        // createCommandBuffers로 이름을 바꿉시다.
+        // 그리고 위에 멤버로 선언해 놨었던 commandBuffer 변수를 벡터형태의 commandBuffers로 만듭시다.
+        // 
+        // 이제 실제 createCommandBuffers함수로 가서, 실제 커맨드 버퍼를 생성하는 부분들의 코드를 다음과 같이 바꿔줍시다.
+        // 
+        // 이후 createSyncObjects 함수로 가서 semaphore와 fence관련 멤버 변수들의 생성 또한 다시 해줍니다.
+        // 
+        // cleanUp 함수로 가서 객체를 지우는 것도 잊지 말도록 합시다.
+        // 맞다, 전에도 말했지만 커맨드 버퍼는 destroy 해줄 필요가 없습니다. commandPool이 dstroy될때 자동으로 같이 되니까요.
+        // 
+        // 이젠 매 프레임마다 올바른 오브젝트를 사용하기 위해서 current frame을 tracking 해줄겁니다. 멤버변수로
+        // uint32_t currentFrame = 0; 을 선언해 줍시다. 그리고 drawFrame함수로 가서 해당 변수를 실제로 사용하기 위해
+        // 다음과 같이 함수를 수정해 줍시다.
+        // 
+        // 함수의 마지막엔 당연히 프레임이 끝났으면 매 번 다음 프레임값으로 갱신해주는 것도 잊으면 안되겠죠 
+        // 
+        // 이제 MAX_FRAMES_IN_FLIGHT개의 프레임보다 적은 수의 프레임 작업들이 queue에 들어가고 각 프레임들이
+        // 서로를 짖뭉게지 못하도록하는 모든 필요한 동기화 작업을 완료했습니다.
+        // 
+        // 여기서 주의할 점이 하나 있습니다. 최종적으로 했던 cleanUp() 함수와 같은 코드들처럼 다른 부분들은
+        // vkDeviceWaitIdle함수처럼 대략적으로 동기화 함수들에 의존하는 것이 더 좋습니다.
+        // 성능 요구사항에 따라서 어떤 접근방법을 사용할지는 직접 결정하세요.
+        // 
+        // 동기화에 대해 더욱 배우고 싶다면 다음의 링크를 참고하세요
+        // https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples#swapchain-image-acquire-and-present
+        // 
+        // 다음 챕터에선, 잘 작동하는 vulkan프로그램을 위해 필요로되는 작은 부분에 대해 하나 더 다뤄볼 겁니다.
+        // 
+        // 
+        // 
+        // 
+
     }
 
     void drawFrame() {
@@ -1418,7 +1646,7 @@ private:
         // 가능한 하드웨어의 기능들을 모두 외부로 노출했기에 사전작업이 복잡했을 뿐이지 실제 렌더링 작업으로 가면
         // 생각보다 별 일 없습니다. 아마도...요?
         
-        vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
         // 우선, 우리는 두 개의 프레임이 동시에 렌더링 되길 원하지 않기에 그리기를 시작하기 전에 
         // 펜스를 이용해 이전 프레임이 끝날 때까지 기다려 주도록 하겠습니다.
         // 만약 그리려고 할 때 이전 프레임의 렌더링이 이미 끝났으면 기다리지 않고 바로 넘어가겠죠.
@@ -1428,7 +1656,51 @@ private:
         // 큰 의미는 없겠네요.
         // 해당 함수는 또한, fence를 기다리는 최대치인 timeout을 정할 수 있는데 이를 UINT64_MAX로 지정하면 timeout을 없앨 수 있죠
         
-        vkResetFences(device, 1, &inFlightFence);
+        // vkQueuePresentKHR함수의 result를 통해 reacreateSwapChain을 했더라도 여전히 남아있는 문제가 있습니다.
+        // 지금같은 경우에 데드락이 걸릴 수도 있거든요? 코드를 디버깅 해보면 어플리케이션이 vkWaitForFences함수에서 데드락이 걸리는
+        // 것을 볼 수 있습니다.
+        // 왜냐면 vkAcquireNextImageKHR의 반환값이 VK_ERROR_OUT_OF_DATE_KHR라면 스왑체인을 다시 만들고 drawFrame을 리턴하기
+        // 때문입니다. 하지만 지금같은 경우 리턴이 일어나기 전에 현재 프레임의 실행을 vkWaitForFences로 기다리고 바로 
+        // vkResetFences를 하잖아요? 그러면 펜스가 unsignaled될텐데 함수를 중간에 리턴해 버렸기 때문에
+        // GPU에게 작업을 보내주지 않아서 다시 signaled상태로 바꿔줄 작업의 목록을 보내주지 않아서 평생 unsignaled상태에
+        // 멈춰버리는 것이죠.
+        // 
+        // 지금 상황에서 해결방법은 간단합니다. vkResetFences함수를 스왑체인 recreate조건을 판단하는 로직 아래로 내려버리면
+        // queue에 작업을 보내는 것과 펜스를 unsignaled상태로 두는 작업단위가 한 번에 실행되도록 보장이 되겠죠
+        // 이렇게 해서, 만약 return이 일찍 일어나도 펜스는 여전히 signaled상태라서 같은 펜스 오브젝트를 활용하는 다음 시간까지
+        // 데드락이 걸리는 일은 없겠죠
+        // 
+        //
+
+        // 펜스 설정을 모두 마친 이후 drawFrame 내에서 해야 할 다음 일은, 스왑체인으로부터 이미지를 얻어오는 것입니다.
+        // swapChain은 현재 glfw로부터 얻어온 extension이기에 vk*KHR함수를 이용하도록 합니다. 
+        uint32_t imageIndex;
+        VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        // 첫번째랑 두번째 파라미터는 뭔지 다들 아실테고, 세 번째 파라미터는 나노세컨드 단위로 이미지가 available해지는
+        // 것을 기다리는 timeout입니다. MAX로 설정해서 일단은 비활성화 해둡시다.
+        // 다음 두 파라미터는 present engine이 이미지를 사용하는 것을 끝냈을 때 어떤 semaphore에게 신호를 줄 지 입니다.
+        // 세마포어도 가능하고 펜스도 가능합니다. 지금은 세마포어를 이용할 것이므로 imageAvailableSemaphore를 네번째 파라미터로 전달해줍니다.
+        // 마지막 파라미터는 사용가능해진 이미지의 인덱스를 얻어옵니다. 해당 인덱스는 통해 우리가 클래스 멤버로 만들어둔
+        // swapChainImages 배열의 인덱스에 해당합니다. 우리는 VkFrameBuffer를 골라주기 위해 해당 인덱스를 활용하겠습니다.
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapChain();
+            return;
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            throw std::runtime_error("failed to acquire swap chain image!");
+        }
+        // 만약 이미지를 얻어오려고 하는데 스왑체인이 out of date상태라면, 해당 스왑체인에 present하는 것은 불가능합니다.
+        // 그러므로 스왑체인을 다시 만들어서 다름 drawFrame 호출에 다시 시도해야 합니다.
+        // 
+        // 또한 suboptimal인지도 확인해야겠죠? 하지만 저는 어쨋든 suboptimal상태에도 그냥 present를 계속 진행하도록 하겠습니다.
+        // 왜냐면 우리는 이미 이미지를 얻어왔잖아요? VK_SUCCESS와 VK_SUBOPTIMAL_KHR모두 success로 간주하도록 합시다.
+        // 
+        // 이제 해당 함수의 vkQueuePresentKHR 함수의 호출부로 이동해보도록 하죠
+        //
+
+
+        vkResetFences(device, 1, &inFlightFences[currentFrame]);
         // fence를 기다리는 것이 끝났다면 이전 프레임의 렌더링이 완료됐다는 뜻이므로, 이젠 이번 프레임을 그리기 시작해야 함으로
         // 이번 프레임을 위한 펜스를 새롭게 지정해줍시다. 근데, 작업을 계속하기 전에, 우리 코드에 좀 기겁할만한 점이 있습니다.
         // 우리가 처음 drawFrame() 을 호출할 때, 곧바로 inFlightFence가 signaled되기를 기다립니다.
@@ -1441,23 +1713,14 @@ private:
 
 
 
-        // 펜스 설정을 모두 마친 이후 drawFrame 내에서 해야 할 다음 일은, 스왑체인으로부터 이미지를 얻어오는 것입니다.
-        // swapChain은 현재 glfw로부터 얻어온 extension이기에 vk*KHR함수를 이용하도록 합니다. 
-        uint32_t imageIndex;
-        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
-        // 첫번째랑 두번째 파라미터는 뭔지 다들 아실테고, 세 번째 파라미터는 나노세컨드 단위로 이미지가 available해지는
-        // 것을 기다리는 timeout입니다. MAX로 설정해서 일단은 비활성화 해둡시다.
-        // 다음 두 파라미터는 present engine이 이미지를 사용하는 것을 끝냈을 때 어떤 semaphore에게 신호를 줄 지 입니다.
-        // 세마포어도 가능하고 펜스도 가능합니다. 지금은 세마포어를 이용할 것이므로 imageAvailableSemaphore를 네번째 파라미터로 전달해줍니다.
-        // 마지막 파라미터는 사용가능해진 이미지의 인덱스를 얻어옵니다. 해당 인덱스는 통해 우리가 클래스 멤버로 만들어둔
-        // swapChainImages 배열의 인덱스에 해당합니다. 우리는 VkFrameBuffer를 골라주기 위해 해당 인덱스를 활용하겠습니다.
+
 
         // imageIndex를 얻어온 이후, command buffer에 해야 할 일들을 기록하겠습니다.
         // 우선, vkResetCommandBuffer 함수를 불러 기록이 가능하게 해줍니다.
-        vkResetCommandBuffer(commandBuffer, 0);
+        vkResetCommandBuffer(commandBuffers[currentFrame], 0);
         // 두 번째 파라미터는 VkCommandBufferResetFlagBits 라는 flag인데 지금은 딱히 특별한 설정을 해주지 않을거라 0으로 남깁니다.
         // 이제, recordCommandBuffer를 이용해 우리가 원하는 command를 기록해줍시다.
-        recordCommandBuffer(commandBuffer, imageIndex); // commandBuffer는 핸들값이기에 그냥 넘겨줘도 됨
+        recordCommandBuffer(commandBuffers[currentFrame], imageIndex); // commandBuffer는 핸들값이기에 그냥 넘겨줘도 됨
         // 기록을 완료하면, 이제 커맨드 버퍼를 GPU에 전송 할 수 있습니다.
         // (해당 함수는 우리가 전에 직접 정의해준 함수입니다)
 
@@ -1465,7 +1728,7 @@ private:
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame]};
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 
 
@@ -1479,19 +1742,19 @@ private:
         // 이 말을 이론적으로 본다면, "이미지가 아직 available하지 않아도 vertex shader는 이미시작할 수도 있다는 뜻입니다."(중요)
         // waitStages[] 의 각각의 요소들은 pWaitSemaphore와 대응되죠.
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
+        submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
         // 다음 두 버퍼는, execution을 위해 어느 버퍼가 전송될지를 결정합니다. 우리는 우선 단순히 single command buffer
         // 만 사용하니 이것만 보내도록 하겠습니다.
 
 
-        VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame]};
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
         // signalSemaphoreCount랑 pSignalSemaphores파라미터는 커맨드 버퍼의 동작이 끝나면
         // 어느 세마포어에 시그널을 보낼지 정의합니다.
         // 우리의 경우에, renderFinishSemaphore를 사용합니다.
 
-        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
             throw std::runtime_error("failed to submit draw command buffer!");
         }
         // 이제 command buffer를 graphics queue로 보내줍니다.
@@ -1522,7 +1785,7 @@ private:
         // 그리고 또 문제가 있습니다. 사실 서브패스는 실행 순서가 없거든요?
         // 서브패스는 default로 특정 순서를 지켜서 실행되지 않고 동기적으로 실행됩니다.
         // 그것이 우리가 subpass dependencies를 지정해 줘야 하는 이유입니다.
-        // 우리가 여기서 semaphore로 했던 작업을 subpass dependencies로 해준다고 생각하면 되겠군요.
+        // 우리가 여기서 semaphore로 했던 작업을 subpass에선 subpass dependencies가 해결 해준다고 생각하면 되겠군요.
         
         // subpass의 종속성을 기술하는 것은 VkSubpassDependency 구조체에 정의됩니다.
         // createRenderPass()함수로 가서 dependency라는 이름의 구조체를 정의해보죠.
@@ -1546,12 +1809,12 @@ private:
         // 어느 이미지에 그릴지를 정의합니다. 대부분의 경우에는 하나의 스왑체인에만 그림을 그릴거에요
         
         presentInfo.pResults = nullptr; // Optional
-        // 마지막은 optaional한 파라미터인데 위에서 설정준 각각의 스왑체인에 대한 presentation결과값이
+        // 마지막은 optaional한 파라미터인데 위에서 설정해준 각각의 스왑체인에 대한 presentation결과값이
         // 성공적이었는지 아닌지를 반환해주는 value의 array를 정의해줍니다.
         // 근데 대부분의 경우에는 하나의 스왑체인을 쓰고 있기 때문에 필수적이진 않습니다.
         // 왜냐면 presentation 함수 자체가 해당 값을 리턴해주거든요. 
         
-        vkQueuePresentKHR(presentQueue, &presentInfo);
+        result =  vkQueuePresentKHR(presentQueue, &presentInfo);
         // 위의 함수를 통해 이미지를 스왑체인에 present하는 것을 요청합니다.
         // 이에 대한 에러 핸들링은 vkAcquireNextImageKHR 와 vkQueuePresentKHR 에서 이뤄지는데 이는 다음 챕터에서 다뤄보죠
         // 왜냐면 우리가 봤던 다른 함수들처럼 여기서 실패한다고 필수적으로 프로그램이 종료해야하진 않거든요.
@@ -1568,6 +1831,22 @@ private:
         // 이를 위해 mainLoop 함수로 돌아가보죠
         //
 
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
+            framebufferResized = false;
+            recreateSwapChain();
+        }
+        else if (result != VK_SUCCESS) {
+            throw std::runtime_error("failed to present swap chain image!");
+        }
+        // vkQueuePresentKHR 함수는 위의 vkAcquireNextImageKHR와 같은 값들을 리턴합니다.
+        // 이러한 경우에도 우리는 만약 이것이 suboptimal이라면 스왑체인을 다시 만들어야되죠.
+        // 이젠 다시 vkWaitForFences 함수로 돌아가 봅시다.
+
+
+
+
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+        // 당연히 프레임이 끝났으면 매 번 다음 프레임값으로 갱신해주는 것도 잊으면 안되겠죠 
 
     }
 
@@ -1658,28 +1937,24 @@ private:
 
     void cleanup() {
 
-        vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
-        vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
-        vkDestroyFence(device, inFlightFence, nullptr);
+        cleanupSwapChain();
 
-        vkDestroyCommandPool(device, commandPool, nullptr);
-
-        for (auto framebuffer : swapChainFrameBuffers) {
-            vkDestroyFramebuffer(device, framebuffer, nullptr);
-        }
 
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+
         vkDestroyRenderPass(device, renderPass, nullptr);
 
-        for (auto imageView : swapChainImageViews) {
-            vkDestroyImageView(device, imageView, nullptr);
-            // window의 image와 다르게 imageView는 명시적을 우리가 직접 생성했기 때문에 직접 지워줘야함
-            
-
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
         }
 
-        vkDestroySwapchainKHR(device, swapChain, nullptr);
+        
+        // Command buffer는 cmannd buffer가 없어질 때 자동으로 없어지기 때문에 별도로 commandBuffer를 없애줄
+        // 필요가 없음. 실제로 없애주는 vkDestroyCommandBuffer함수도 없음
+        vkDestroyCommandPool(device, commandPool, nullptr);
 
         vkDestroyDevice(device, nullptr);
 
@@ -1687,11 +1962,13 @@ private:
             DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
         }
 
+
         vkDestroySurfaceKHR(instance, surface, nullptr);
         vkDestroyInstance(instance, nullptr);
 
         glfwDestroyWindow(window);
         glfwTerminate();
+
     }
 
 
